@@ -1,12 +1,14 @@
 """SpliceAI (OpenSpliceAI MANE-10000nt) weight cache.
 
 OpenSpliceAI publishes the 5-model MANE-10000nt ensemble as standalone
-PyTorch state-dict files at:
-    https://ccb.jhu.edu/openspliceai/content/pretrained_models/GRCh38_MANE.html
+PyTorch state-dict files on the Johns Hopkins CCB FTP mirror:
+    ftp://ftp.ccb.jhu.edu/pub/data/OpenSpliceAI/OSAI-MANE/10000nt/
 
-We mirror the individual .pt files to ~/.oligoclaude/spliceai/mane_10000nt/
-so Windows users (who cannot install the full openspliceai package because
-of its pysam dependency) can still load the weights.
+We download each .pt file to ~/.oligoclaude/spliceai/mane_10000nt/ so
+Windows users (who cannot install the full openspliceai package because
+of its pysam dependency) can still load the weights. If your network
+blocks FTP, grab the files manually from the URL above and drop them in
+the cache dir — `ensure_spliceai_weights()` skips already-present files.
 """
 from __future__ import annotations
 
@@ -18,10 +20,10 @@ from typing import Optional
 CACHE_DIR = Path.home() / ".oligoclaude" / "spliceai" / "mane_10000nt"
 
 _MIRROR_BASES = [
-    # Primary: JHU HTTPS mirror (works cross-platform; no FTP).
-    "https://ccb.jhu.edu/openspliceai/data/pretrained_models/OSAI-MANE/10000nt",
-    # Secondary: the FTP path, reachable over HTTP via the CCB gateway.
-    "https://ccb.jhu.edu/pub/data/OpenSpliceAI/OSAI-MANE/10000nt",
+    # JHU CCB FTP — the canonical publication location for the MANE weights.
+    # Verified working 2025; the previously-tried HTTPS mirrors at
+    # ccb.jhu.edu/openspliceai/data/... and ccb.jhu.edu/pub/data/... 404.
+    "ftp://ftp.ccb.jhu.edu/pub/data/OpenSpliceAI/OSAI-MANE/10000nt",
 ]
 _WEIGHT_FILES = [
     "model_10000nt_rs10.pt",

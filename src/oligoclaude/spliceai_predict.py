@@ -107,24 +107,40 @@ def setup_spliceai(
     return models, device
 
 
+_MANE_10000_L = 32
+_MANE_10000_W = [11] * 8 + [21] * 4 + [41] * 4
+_MANE_10000_AR = [1] * 4 + [4] * 4 + [10] * 4 + [25] * 4
+
+
 def _instantiate_spliceai(SpliceAI_cls):
     """Instantiate the SpliceAI module with the MANE-10000nt architecture.
 
-    Tries the known constructor signatures across openspliceai versions.
+    `openspliceai>=0.0.5` exposes
+        SpliceAI(L, W, AR, apply_softmax=True)
+    where L is the base filter count (32), W is the per-residual-block
+    conv width list, and AR is the per-block atrous rate list. The
+    MANE-10000nt variant uses 16 residual blocks in four groups of four,
+    as defined in `openspliceai/train/train.py::initialize_model_and_optim`
+    for `flanking_size=10000`. Older signatures are probed as fallbacks.
     """
-    for kwargs in (
-        {"L": CL_MAX},
-        {"L": CL_MAX, "W": None, "AR": None},
-        {"flanking_size": CL_MAX},
-        {},
-    ):
+    attempts = (
+        ((_MANE_10000_L, _MANE_10000_W, _MANE_10000_AR), {}),
+        ((_MANE_10000_L, _MANE_10000_W, _MANE_10000_AR), {"apply_softmax": True}),
+        ((), {"L": CL_MAX}),
+        ((), {"flanking_size": CL_MAX}),
+        ((), {}),
+    )
+    last_err: Optional[Exception] = None
+    for args, kwargs in attempts:
         try:
-            return SpliceAI_cls(**kwargs)
-        except TypeError:
+            return SpliceAI_cls(*args, **kwargs)
+        except (TypeError, ValueError) as e:
+            last_err = e
             continue
     raise RuntimeError(
         "Could not instantiate SpliceAI class — unknown constructor signature. "
-        "Please report the openspliceai version you have installed."
+        f"Last error: {last_err!r}. Please report your openspliceai version "
+        "(`pip show openspliceai`) so the probe table can be extended."
     )
 
 
