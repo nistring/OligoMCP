@@ -142,19 +142,19 @@ def write_bed(
     compact_path = results_dir / f"{config_name}_ASO_{source}.bed"
     full_path = results_dir / f"{config_name}_ASO_{source}_full.bed"
 
-    with open(compact_path, "w") as f:
+    with open(compact_path, "w", newline="") as f:
         f.write(
             f'track name={config_name}_ASO_{source} '
             f'description="ASO scores for {source}" visibility="pack" useScore=1\n'
         )
-        compact_df.to_csv(f, sep="\t", index=False, header=False)
+        compact_df.to_csv(f, sep="\t", index=False, header=False, lineterminator="\n")
 
-    with open(full_path, "w") as f:
+    with open(full_path, "w", newline="") as f:
         f.write(
             f'track name={config_name}_ASO_{source}_full '
             f'description="Full ASO scores for {source}" visibility="pack" useScore=1\n'
         )
-        full_df.to_csv(f, sep="\t", index=False, header=False)
+        full_df.to_csv(f, sep="\t", index=False, header=False, lineterminator="\n")
 
     return compact_path, full_path
 

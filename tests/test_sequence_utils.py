@@ -17,7 +17,7 @@ def test_reverse_complement_roundtrip():
 
 def test_reverse_complement_lowercase():
     assert reverse_complement("acgt") == "acgt"
-    assert reverse_complement("aAcC") == "gGtT"
+    assert reverse_complement("aAcC") == "GgTt"
 
 
 def test_reverse_complement_preserves_n():
