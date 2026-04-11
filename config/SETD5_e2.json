@@ -1,0 +1,23 @@
+{
+  "gene_symbol": "SETD5",
+  "assembly": "hg38",
+  "gtf_url": "https://storage.googleapis.com/alphagenome/reference/gencode/hg38/gencode.v46.annotation.gtf.gz.feather",
+  "fasta_path": "data/GRCh38.primary_assembly.genome.fa",
+  "results_dir": "results",
+  "data_dir": "data",
+  "dna_api_key": "REPLACE_WITH_YOUR_KEY",
+  "_comment": "REPLACE_WITH_YOUR_KEY",
+  "track_filter": "polyA plus RNA-seq",
+  "ontology_terms": ["CL:0000127","CL:0002319","CL:0011020","CL:0000047","CL:0000679"],
+  "requested_outputs": [
+    "RNA_SEQ",
+    "SPLICE_SITE_USAGE"
+  ],
+  "exon_intervals": [9433369, 9433562],
+  "_exon_comment": "Use 'exon_index' (int) to select by transcript exon number, OR 'exon_sequence' (str) to search by genomic sequence",
+  "flank": [200, 200],
+  "strand": "+",
+  "_resize_comment": "Optional: manually specify resize_width (16384, 131072, 524288, or 1048576). If omitted, auto-selected based on gene length",
+  "_viz_resize_width_comment": "Optional: specify viz_resize_width for visualization (default: 32768)",
+  "ASO_length": 18
+}
