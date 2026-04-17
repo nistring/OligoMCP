@@ -38,9 +38,23 @@ For unit tests: `pip install -e .[dev]`
 
 ### One-time setup
 
+Run once after installing:
+
 ```bash
-oligoclaude set-api-key YOUR_ALPHAGENOME_KEY   # saved to ~/.oligoclaude/credentials.json (0600)
-oligoclaude fetch-spliceai-weights              # downloads MANE-10000nt ensemble (~3 MB x 5)
+oligoclaude init
+```
+
+This downloads the SpliceAI MANE-10000nt weights (~3 MB × 5) to
+`~/.oligoclaude/spliceai/` and prompts (hidden) for your AlphaGenome API key
+(saved to `~/.oligoclaude/credentials.json`, mode 0600). Both steps are
+idempotent — re-running `init` skips what's already configured.
+
+Non-interactive / CI / Docker:
+
+```bash
+ALPHAGENOME_API_KEY=sk-... oligoclaude init -y           # use env var, skip prompt
+oligoclaude init --skip-api-key                           # just download weights
+oligoclaude init --skip-spliceai                          # AlphaGenome-only install
 ```
 
 **No genome download required.** OligoClaude fetches only the needed genomic
@@ -56,6 +70,8 @@ When a local FASTA is available (via `fetch-genome` or a `fasta_path` in the
 config), OligoClaude uses it automatically via pyfaidx. Otherwise it
 transparently falls back to the UCSC API.
 
+Individual-step commands are also available if you prefer: `oligoclaude
+set-api-key`, `oligoclaude fetch-spliceai-weights`, `oligoclaude fetch-genome`.
 You can also set the API key via the `ALPHAGENOME_API_KEY` environment
 variable instead of the credentials file.
 
