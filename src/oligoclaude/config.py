@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Optional
 
 
+_DEFAULT_GTF_URL = (
+    "https://storage.googleapis.com/alphagenome/reference/gencode/hg38/"
+    "gencode.v46.annotation.gtf.gz.feather"
+)
+
+
 @dataclass
 class OligoConfig:
     gene_symbol: str
@@ -65,7 +71,7 @@ def load_config(path: Path) -> OligoConfig:
         strand=raw.get("strand", "+"),
         assembly=raw.get("assembly", "hg38"),
         fasta_path=_resolve(raw.get("fasta_path")),
-        gtf_url=raw["gtf_url"],
+        gtf_url=raw.get("gtf_url") or _DEFAULT_GTF_URL,
         results_dir=_resolve(raw.get("results_dir", "results")),
         data_dir=_resolve(raw.get("data_dir", "data")),
         dna_api_key=raw.get("dna_api_key") or None,

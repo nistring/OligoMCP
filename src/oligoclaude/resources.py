@@ -202,6 +202,57 @@ def resolve_fasta_path(
 
 # ---------- UCSC online sequence fetch ----------
 
+def lookup_gene_chromosome(gene_symbol: str, assembly: str = "hg38") -> str:
+    """Look up a gene's chromosome via the mygene.info REST API.
+
+    Returns the UCSC-style chromosome string (e.g. `chr3`). Works without
+    AlphaGenome or a local GTF, so it unblocks `--skip-alphagenome` runs
+    driven by only a gene symbol.
+    """
+    pos_field = "genomic_pos_hg19" if assembly.lower() in {"hg19", "grch37"} else "genomic_pos"
+    params = urllib.parse.urlencode({
+        "q": f"symbol:{gene_symbol}",
+        "species": "human",
+        "size": 1,
+    })
+    hits_url = f"https://mygene.info/v3/query?{params}"
+    req = urllib.request.Request(hits_url, headers={"User-Agent": "oligoclaude/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            hits_data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to look up gene {gene_symbol!r} on mygene.info: {e}"
+        ) from e
+
+    hits = hits_data.get("hits") or []
+    if not hits:
+        raise RuntimeError(f"mygene.info returned no hits for gene symbol {gene_symbol!r}")
+    gene_id = hits[0].get("_id")
+    if not gene_id:
+        raise RuntimeError(f"mygene.info hit missing _id for {gene_symbol!r}: {hits[0]}")
+
+    detail_url = f"https://mygene.info/v3/gene/{gene_id}"
+    req = urllib.request.Request(detail_url, headers={"User-Agent": "oligoclaude/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            detail = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to fetch gene detail for {gene_symbol!r} (id={gene_id}): {e}"
+        ) from e
+
+    pos = detail.get(pos_field)
+    if isinstance(pos, list):
+        pos = pos[0] if pos else None
+    if not pos or "chr" not in pos:
+        raise RuntimeError(
+            f"mygene.info has no {pos_field} for {gene_symbol!r} (id={gene_id})"
+        )
+    chrom = str(pos["chr"])
+    return chrom if chrom.startswith("chr") else f"chr{chrom}"
+
+
 def fetch_sequence_ucsc(assembly: str, chrom: str, start: int, end: int) -> str:
     """Fetch a genomic region from the UCSC REST API (0-based, end-exclusive).
 

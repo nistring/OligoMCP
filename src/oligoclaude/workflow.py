@@ -104,7 +104,7 @@ def run_workflow(
         exon_start, exon_end = cfg.exon_intervals
         scan_genomic_start = exon_start - cfg.flank[0]
         scan_genomic_end = exon_end + cfg.flank[1]
-        chrom = _infer_chrom_from_gtf(cfg)
+        chrom = _infer_chrom(cfg)
         ref_seq = load_reference_sequence(
             cfg.fasta_path, chrom, scan_genomic_start, scan_genomic_end,
             assembly=cfg.assembly,
@@ -272,18 +272,30 @@ def run_workflow(
     )
 
 
-def _infer_chrom_from_gtf(cfg: OligoConfig) -> str:
-    """Fallback to load chromosome from GTF when AlphaGenome is skipped."""
-    try:
-        from alphagenome.data import gene_annotation
+def _infer_chrom(cfg: OligoConfig) -> str:
+    """Resolve the target chromosome when AlphaGenome is skipped.
 
-        gtf = pd.read_feather(cfg.gtf_url)
-        gene_interval = gene_annotation.get_gene_interval(
-            gtf, gene_symbol=cfg.gene_symbol
-        )
-        return gene_interval.chromosome
-    except Exception as e:
-        raise RuntimeError(
-            "Could not infer chromosome without AlphaGenome. Add an explicit "
-            "`chromosome` field to the config or do not use --skip-alphagenome."
-        ) from e
+    Tries mygene.info first (no heavy deps, handles bare-symbol NL input),
+    then falls back to reading the GTF feather via AlphaGenome if installed.
+    """
+    from .resources import lookup_gene_chromosome
+
+    try:
+        return lookup_gene_chromosome(cfg.gene_symbol, cfg.assembly)
+    except Exception as mygene_err:
+        try:
+            from alphagenome.data import gene_annotation
+
+            gtf = pd.read_feather(cfg.gtf_url)
+            return gene_annotation.get_gene_interval(
+                gtf, gene_symbol=cfg.gene_symbol
+            ).chromosome
+        except Exception as gtf_err:
+            raise RuntimeError(
+                f"Could not resolve chromosome for {cfg.gene_symbol!r}. "
+                f"mygene.info lookup failed: {mygene_err!r}. "
+                f"GTF fallback failed: {gtf_err!r}."
+            ) from gtf_err
+
+
+_infer_chrom_from_gtf = _infer_chrom
