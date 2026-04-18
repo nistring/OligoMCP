@@ -426,10 +426,14 @@ def predict_aso_efficacy_inline(
     scores = _scores_from_csv(result.scores_csv)
     compact_beds = {p.name: p.read_text() for p in result.bed_files if p.exists()}
 
+    # Rank only on the primary (fractional) score columns. `_raw`
+    # siblings duplicate the ranking — including them here would
+    # double every entry in `top_candidates`.
     score_cols = [
         c for c in (scores[0].keys() if scores else [])
         if c not in {"aso_id", "ASO_sequence", "ASO_antisense", "position",
                      "length", "Measured (RT-PCR)", "Region (Exon)"}
+        and not c.endswith("_raw")
     ]
     top: dict[str, list[dict]] = {}
     for col in score_cols:

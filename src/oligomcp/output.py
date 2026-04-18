@@ -145,9 +145,17 @@ def export_all(
     candidates: list[AsoCandidate],
     all_scores: dict[str, np.ndarray],
 ) -> list[Path]:
-    """Write one BED file per score source covering every scored candidate."""
+    """Write one BED file per primary score source.
+
+    Columns ending in `_raw` are kept in the CSV for reproducibility
+    but intentionally skipped here to avoid doubling the track count
+    in UCSC / IGV (the primary frac columns carry identical rankings
+    with more interpretable magnitudes).
+    """
     written: list[Path] = []
     for source, arr in all_scores.items():
+        if source.endswith("_raw"):
+            continue
         if arr is None or len(arr) == 0:
             continue
         path = write_bed(
