@@ -22,14 +22,19 @@ dependencies = [
     "pyfaidx>=0.8",
     "tqdm>=4.66",
     "mcp>=1.2",
+    # SpliceAI auto-installs on Linux/macOS (including Prefect Horizon /
+    # FastMCP Cloud). Skipped on Windows because its pysam transitive dep
+    # has no Windows wheels — Windows users should run
+    # `pip install openspliceai --no-deps` separately (OligoClaude only
+    # imports the pysam-free `openspliceai.train_base.openspliceai.SpliceAI`
+    # path).
+    "openspliceai ; platform_system != 'Windows'",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5"]
-# SpliceAI scoring requires the openspliceai package. On Windows its pysam
-# dependency has no wheels — install with `pip install openspliceai --no-deps`
-# (the pysam-free import path `openspliceai.train_base.openspliceai.SpliceAI`
-# is all OligoClaude needs). Linux/macOS users can use the normal install.
+# Backwards-compat alias: `pip install -e .[spliceai]` still works even
+# though openspliceai is already in main deps on non-Windows platforms.
 spliceai = ["openspliceai"]
 
 [project.scripts]

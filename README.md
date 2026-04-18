@@ -2,10 +2,13 @@
 
 Predict antisense oligonucleotide (ASO) efficacy using **AlphaGenome** and **SpliceAI**, compare to experimental RT-PCR data, and visualize results on the **UCSC Genome Browser** — all from a single JSON config.
 
-Exposed three ways:
+Exposed four ways:
 1. CLI (`oligoclaude run --config …`)
 2. Python library (`from oligoclaude import run_workflow`)
 3. **Local MCP server** so Claude Desktop / Claude Code can call it as a connector
+4. **Hosted HTTP MCP server** on FastMCP Cloud / Prefect Horizon, so anyone
+   can use it from a Claude client without cloning the repo (see the
+   "Remote HTTP deploy" section below).
 
 ## Install
 
@@ -161,18 +164,30 @@ file paths:
 
 ## Use from Claude (MCP connector)
 
-OligoClaude ships a local **MCP server** that Claude Code and Claude Desktop can call as a first-class connector, exposing a single tool: **`predict_aso_efficacy`**.
+OligoClaude exposes three MCP tools that Claude Code and Claude Desktop can
+call as a first-class connector:
 
-### Register in Claude Code
+- **`list_gene_exons(gene_symbol, assembly)`** — discover exons of a gene's
+  canonical transcript via mygene.info. Use this first when the user only
+  supplies a gene symbol so you can show them the exons and ask which to
+  target. No AlphaGenome key required.
+- **`predict_aso_efficacy_inline(gene_symbol, exon_intervals, ...)`** —
+  scoring API that takes config fields as tool arguments and returns CSV
+  and BED content inline (no files on disk for the caller). Designed for
+  **remote HTTP deployments** (FastMCP Cloud / Prefect Horizon) but works
+  locally too.
+- **`predict_aso_efficacy(config_path, ...)`** — the original file-based
+  tool. Requires a JSON config on the server's filesystem, so only useful
+  for **local stdio** deployments.
+
+### Local stdio: register in Claude Code / Desktop
 
 ```bash
 pip install -e /path/to/OligoClaude
 claude mcp add oligoclaude -- oligoclaude-mcp
 ```
 
-### Register in Claude Desktop
-
-Edit `~/.config/Claude/claude_desktop_config.json` (Linux),
+Or Claude Desktop `~/.config/Claude/claude_desktop_config.json` (Linux),
 `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), or
 `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
@@ -181,9 +196,7 @@ Edit `~/.config/Claude/claude_desktop_config.json` (Linux),
   "mcpServers": {
     "oligoclaude": {
       "command": "oligoclaude-mcp",
-      "env": {
-        "ALPHAGENOME_API_KEY": "your-alphagenome-key-here"
-      }
+      "env": { "ALPHAGENOME_API_KEY": "your-alphagenome-key-here" }
     }
   }
 }
@@ -194,22 +207,77 @@ the server reads `~/.oligoclaude/credentials.json` on startup.
 
 Restart Claude Desktop. Then in any conversation you can say:
 
-> *"Use the oligoclaude MCP to predict ASO efficacy for /home/me/OligoClaude/config/SETD5_e1.json"*
+> *"Analyze ASO candidates for the SETD5 gene"*
 
-Claude will invoke `predict_aso_efficacy(config_path=...)` and receive a dict with the scores CSV path, BED file paths, UCSC browser URL, correlation plot path, and per-exon Pearson/Spearman stats.
+Claude will call `list_gene_exons("SETD5")`, present the exons, ask you
+which to target, and then run `predict_aso_efficacy_inline` (or the
+file-based tool if you point it at a config).
 
-### Tool signature
+### Remote HTTP deploy on Prefect Horizon (FastMCP Cloud)
+
+Anyone can use the hosted server without cloning the repo. Deploy once:
+
+1. Fork this repo (or leave it as-is if you own it) — the deploy needs a
+   GitHub repo to pull from.
+2. Sign in at [horizon.prefect.io](https://horizon.prefect.io) with your
+   GitHub account.
+3. Create a new server, select the repo, and use entrypoint
+   **`server.py:mcp`**. Horizon auto-installs the dependencies from
+   `pyproject.toml`.
+4. Click deploy. Horizon publishes the server at
+   `https://<your-name>.fastmcp.app/mcp` in ~60 seconds and
+   auto-redeploys on every push to `main`.
+
+Horizon also supports PR-preview URLs out of the box. No AlphaGenome key
+is baked into the deployment — end users pass their own key as the
+`alphagenome_api_key` argument to each `predict_aso_efficacy_inline`
+call (in-memory only, not persisted server-side). SpliceAI weights are
+downloaded into a per-container cache on first use (~14 MB).
+
+To register the hosted URL in Claude Code:
+
+```bash
+claude mcp add --transport http oligoclaude https://<your-name>.fastmcp.app/mcp
+```
+
+Remote-safety knobs:
+- Request cap: `predict_aso_efficacy_inline` is capped at 300 ASO
+  candidates per call so CPU-bound SpliceAI inference stays under
+  ~60 seconds. The tool returns a `too_many_candidates` status with a
+  suggested `aso_step` when you exceed it.
+- Private install: Horizon offers an "Authentication" toggle so only
+  your org can connect. Leave it off for a public demo.
+
+### Tool signatures
 
 ```python
+list_gene_exons(gene_symbol: str, assembly: str = "hg38") -> dict
+
+predict_aso_efficacy_inline(
+    gene_symbol: str,
+    exon_intervals: list[int],        # [start, end]
+    assembly: str = "hg38",
+    strand: str = "+",
+    aso_length: int = 18,
+    aso_step: int = 5,                # larger = fewer candidates
+    flank: list[int] = [200, 200],
+    target_mode: str = "exclude",
+    skip_alphagenome: bool = True,
+    skip_spliceai: bool = False,
+    alphagenome_api_key: str | None = None,   # per-request, in-memory only
+    samples_max: int = 20,
+    requested_outputs: list[str] | None = None,
+    ontology_terms: list[str] | None = None,
+    track_filter: str = "polyA plus RNA-seq",
+) -> dict  # status, n_candidates, scores, top_candidates, bed_tracks, ucsc_url
+
 predict_aso_efficacy(
     config_path: str,
     skip_alphagenome: bool = False,
     skip_spliceai: bool = False,
     samples_max: int = 20,
-) -> dict
+) -> dict  # local-stdio only; returns server-side file paths
 ```
-
-Returns: `scores_csv`, `bed_files`, `correlation_plot`, `stats`, `ucsc_instructions`, `ucsc_url`, `n_candidates`.
 
 ## How scoring works
 
@@ -226,15 +294,19 @@ Both scores are positive when the ASO weakens exon usage (exon skipping) and neg
 ## Package structure
 
 ```
+server.py         Top-level entrypoint for Horizon / FastMCP Cloud
+                  (re-exports the `mcp` object via absolute imports)
 src/oligoclaude/
   config.py       JSON config loading + OligoConfig dataclass
   core.py         Sequence utils, ASO enumeration, experimental-data helpers
   predict.py      AlphaGenome + SpliceAI scoring (diff_mean formula)
-  output.py       BED export, UCSC browser auto-open, correlation plots
-  resources.py    API credentials, GRCh38 FASTA cache, SpliceAI weight cache
+  output.py       BED export, UCSC URL + browser auto-open, correlation plots
+  resources.py    API credentials, UCSC sequence fetch, SpliceAI weight cache,
+                  mygene.info gene / exon lookup
   workflow.py     End-to-end pipeline orchestration
-  cli.py          CLI entry point (oligoclaude)
-  mcp_server.py   MCP server entry point (oligoclaude-mcp)
+  cli.py          CLI entry point (oligoclaude, oligoclaude-mcp)
+  mcp_server.py   FastMCP server with three tools (list_gene_exons,
+                  predict_aso_efficacy_inline, predict_aso_efficacy)
 ```
 
 ## Library usage
