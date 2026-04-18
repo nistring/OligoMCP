@@ -39,7 +39,13 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+# Use the `fastmcp` package's FastMCP (a.k.a. FastMCP v2) rather than the
+# `mcp.server.fastmcp` one (v1). fastmcp 2.12.3's CLI — the version Prefect
+# Horizon pins — has a bug in its `run_v1_server` wrapper where it calls
+# the v1 `.run()` (which does `asyncio.run()` internally) from inside an
+# already-running async context, producing "Already running asyncio in
+# this thread". v2 instances go through the native code path and work.
+from fastmcp import FastMCP
 
 from .resources import ENV_VAR, get_alphagenome_api_key
 from .workflow import ExonIntervalsRequired, WorkflowResult, run_workflow

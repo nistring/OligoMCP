@@ -21,7 +21,11 @@ dependencies = [
     "biopython>=1.83",
     "pyfaidx>=0.8",
     "tqdm>=4.66",
-    "mcp>=1.2",
+    # Use `fastmcp` (Prefect's v2 FastMCP) instead of `mcp.server.fastmcp`
+    # (v1) — needed because fastmcp 2.12.3's CLI (Prefect Horizon's pinned
+    # runner) has a bug handling v1 FastMCP instances. fastmcp transitively
+    # depends on mcp, so we don't need to pin it separately.
+    "fastmcp>=2.12",
     # Note: the `openspliceai` package is NOT a runtime dep — we vendor its
     # pure-torch `SpliceAI` class in `oligoclaude._spliceai_model` to avoid
     # its heavy transitive deps (`mappy` needs gcc; `pysam` has no Windows
