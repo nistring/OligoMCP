@@ -77,9 +77,11 @@ Everything else defaults. See `config/SETD5_e1.json` for a realistic
 example (custom flank, step, ontology terms, experimental CSV).
 
 **Picking `ontology_terms`**: all 704 AlphaGenome CURIEs are
-pre-snapshotted at `data/alphagenome_ontology_terms.tsv` — `grep` it
-or call `search_ontology_terms` from the MCP. Empty list = average
-across all tracks.
+pre-snapshotted at `data/alphagenome_ontology_terms.tsv` (one row per
+CURIE, including each term's available `track_filters` like `polyA
+plus RNA-seq`) — `grep` it or call `search_ontology_terms` from the
+MCP. Empty list = average across all tracks. Regenerate the snapshot
+with `oligomcp fetch-ontology-terms` (needs AlphaGenome key).
 
 ## Outputs
 
@@ -104,7 +106,7 @@ most-negative hits.
 | Tool | Purpose |
 |---|---|
 | `list_gene_exons(gene_symbol, assembly="hg38")` | Exons of the canonical transcript. No API key. |
-| `search_ontology_terms(query, output_type=None, limit=20)` | Substring search over the 704-CURIE ontology snapshot. No API key. |
+| `search_ontology_terms(query, output_type=None, track_filter=None, limit=20)` | Substring search over the 704-CURIE ontology snapshot, including each CURIE's available `track_filters` (e.g. "polyA plus RNA-seq") so you can confirm a filter exists before passing it. No API key. |
 | `predict_aso_efficacy(config_path, ...)` | File-based scoring. Returns `needs_info` if design fields missing. |
 | `predict_aso_efficacy_inline(gene_symbol, exon_intervals, ...)` | Arg-driven scoring, up to 300 candidates/request. |
 

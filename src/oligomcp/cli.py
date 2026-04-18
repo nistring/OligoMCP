@@ -57,6 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
         f = sub.add_parser(name, help=helptxt)
         f.add_argument("--cache-dir", type=Path, default=None)
 
+    o = sub.add_parser(
+        "fetch-ontology-terms",
+        help="Regenerate data/alphagenome_ontology_terms.tsv from the live AlphaGenome API.",
+    )
+    o.add_argument(
+        "--data-dir", type=Path, default=None,
+        help="Output directory (default: repo-root `data/`).",
+    )
+
     return p
 
 
@@ -111,6 +120,16 @@ def _cmd_fetch_spliceai(args) -> int:
     from .resources import ensure_spliceai_weights
 
     print(f"SpliceAI weights ready at: {ensure_spliceai_weights(args.cache_dir, verbose=True)}")
+    return 0
+
+
+def _cmd_fetch_ontology(args) -> int:
+    from .ontology import save_ontology_snapshot
+
+    print("Fetching AlphaGenome ontology metadata …")
+    tsv, meta = save_ontology_snapshot(args.data_dir)
+    print(f"Wrote {tsv}")
+    print(f"Wrote {meta}")
     return 0
 
 
@@ -181,6 +200,7 @@ _HANDLERS = {
     "clear-api-key": _cmd_clear_api_key,
     "fetch-genome": _cmd_fetch_genome,
     "fetch-spliceai-weights": _cmd_fetch_spliceai,
+    "fetch-ontology-terms": _cmd_fetch_ontology,
 }
 
 

@@ -194,33 +194,11 @@ def list_gene_exons(gene_symbol: str, assembly: str = "hg38") -> dict:
     }
 
 
-# Path to the ontology TSV shipped with the repo. Editable install =
-# this lands next to the checked-out data/ dir; for a plain pip install
-# users would have to regenerate via `scripts/fetch_ontology_terms.py`
-# against their own repo clone.
-_ONTOLOGY_TSV = Path(__file__).resolve().parents[2] / "data" / "alphagenome_ontology_terms.tsv"
-_ONTOLOGY_CACHE: Optional[list[dict]] = None
-
-
-def _load_ontology_terms() -> list[dict]:
-    """Lazily load + cache the ontology-term snapshot as a list of dicts."""
-    global _ONTOLOGY_CACHE
-    if _ONTOLOGY_CACHE is not None:
-        return _ONTOLOGY_CACHE
-    if not _ONTOLOGY_TSV.exists():
-        _ONTOLOGY_CACHE = []
-        return _ONTOLOGY_CACHE
-    import pandas as pd
-
-    df = pd.read_csv(_ONTOLOGY_TSV, sep="\t", dtype=str, keep_default_na=False)
-    _ONTOLOGY_CACHE = df.to_dict(orient="records")
-    return _ONTOLOGY_CACHE
-
-
 @mcp.tool()
 def search_ontology_terms(
     query: str = "",
     output_type: Optional[str] = None,
+    track_filter: Optional[str] = None,
     limit: int = 20,
 ) -> dict:
     """Search AlphaGenome's ontology-term snapshot by tissue/cell-type text.
@@ -229,46 +207,61 @@ def search_ontology_terms(
     hints at a specific biological context ("motor neuron", "liver",
     "iPSC-derived neuron", "GTEx brain cortex", …) so you can populate
     `ontology_terms` with CURIEs that AlphaGenome actually has tracks
-    for. Leaving `ontology_terms` empty makes AlphaGenome average over
-    every track it returns, which is usually not what the user wants
-    when they mentioned a specific tissue.
+    for. Empty `ontology_terms` makes AlphaGenome average over every
+    track, which usually isn't what the user wants.
+
+    Each returned row also carries the `track_filters` column — the
+    pipe-separated list of assay-descriptor substrings that actually
+    appear in track names for that CURIE (e.g. `polyA plus RNA-seq`,
+    `total RNA-seq`, `Histone ChIP-seq H3K27ac`). Mismatched
+    `track_filter` silently drops every AlphaGenome track, so verify
+    the descriptor you intend to pass is present in that list.
 
     Matching is case-insensitive substring over `ontology_curie`,
     `biosample_name`, `biosample_type`, `biosample_life_stage`, and
-    `gtex_tissue`. Multiple whitespace-separated tokens are AND'd —
-    every token must appear in at least one of those fields.
+    `gtex_tissue`. Whitespace-separated tokens are AND'd.
 
     Args:
-        query: Free-form search text. Empty string + no output_type
-            filter returns the first `limit` rows alphabetically.
-        output_type: Optional filter — only return terms that have at
-            least one track in this AlphaGenome output type (e.g.
-            "rna_seq", "splice_site_usage", "atac").
+        query: Free-form search text. Empty string returns the first
+            `limit` rows alphabetically (optionally narrowed by
+            `output_type` / `track_filter`).
+        output_type: Optional — only return terms with at least one
+            track in this AlphaGenome output type (e.g. "rna_seq",
+            "splice_site_usage", "atac").
+        track_filter: Optional — only return terms whose track_filters
+            column contains this substring (case-insensitive). Use to
+            confirm a CURIE has e.g. "polyA plus RNA-seq" before
+            passing that filter to the scoring tool.
         limit: Maximum rows to return (default 20).
 
     Returns:
         status: "ok" | "no_snapshot"
         total: int — number of CURIEs matching (before limit).
         limit: int — echoed limit.
-        results: list of matching rows with keys `ontology_curie`,
+        results: list of rows with keys `ontology_curie`,
             `biosample_name`, `biosample_type`, `biosample_life_stage`,
-            `gtex_tissue`, `available_outputs`, `total_tracks`.
+            `gtex_tissue`, `available_outputs`, `track_filters`,
+            `total_tracks`.
         snapshot_path: str — location of the TSV used for lookup.
         hint: str — explanatory message when there's no snapshot.
     """
-    rows = _load_ontology_terms()
+    from . import ontology as _ont
+
+    rows = _ont.load_ontology_snapshot()
+    snapshot_path = str(_ont.default_tsv_path())
     if not rows:
         return {
             "status": "no_snapshot",
-            "snapshot_path": str(_ONTOLOGY_TSV),
+            "snapshot_path": snapshot_path,
             "hint": (
-                "Ontology snapshot not found. Run `python scripts/fetch_ontology_terms.py` "
-                "from the project root (requires an AlphaGenome API key) to regenerate it."
+                "Ontology snapshot not found. Regenerate it with "
+                "`oligomcp fetch-ontology-terms` (requires an AlphaGenome API key)."
             ),
         }
 
     tokens = [t.lower() for t in (query or "").split() if t.strip()]
     out_filter = (output_type or "").strip().lower()
+    tf_filter = (track_filter or "").strip().lower()
 
     def _row_matches(r: dict) -> bool:
         hay = " ".join(
@@ -283,8 +276,12 @@ def search_ontology_terms(
         if not all(tok in hay for tok in tokens):
             return False
         if out_filter:
-            available = str(r.get("available_outputs", "")).lower()
-            if out_filter not in available.split(","):
+            available = str(r.get("available_outputs", "")).lower().split(",")
+            if out_filter not in available:
+                return False
+        if tf_filter:
+            filters = str(r.get("track_filters", "")).lower()
+            if tf_filter not in filters:
                 return False
         return True
 
@@ -294,7 +291,7 @@ def search_ontology_terms(
         "total": len(matches),
         "limit": limit,
         "results": matches[: max(0, int(limit))],
-        "snapshot_path": str(_ONTOLOGY_TSV),
+        "snapshot_path": snapshot_path,
     }
 
 

@@ -1,8 +1,17 @@
-Generated at: 2026-04-18T17:21:44.517318+00:00
-AlphaGenome version: 0.5.1
+Generated at:         2026-04-18T17:44:22.774602+00:00
+AlphaGenome version:  0.5.1
 Unique ontology CURIEs: 704
-Outputs covered: ['atac', 'cage', 'chip_histone', 'chip_tf', 'contact_maps', 'dnase', 'procap', 'rna_seq', 'splice_junctions', 'splice_site_usage']
+Outputs covered:      ['atac', 'cage', 'chip_histone', 'chip_tf', 'contact_maps', 'dnase', 'procap', 'rna_seq', 'splice_junctions', 'splice_site_usage']
 
-Usage: drop any CURIE (e.g. CL:0000127, UBERON:0002240) into
-the `ontology_terms` list of an OligoMCP config. Empty list =
-average over every track AlphaGenome returns.
+Columns:
+  ontology_curie         — pass this in `ontology_terms` list.
+  biosample_*            — human-readable labels.
+  available_outputs      — AlphaGenome output types with tracks for this CURIE.
+  track_filters          — assay descriptor substrings to pass as `track_filter`;
+                            pipe-separated. If `polyA plus RNA-seq` isn't listed
+                            for a CURIE, the default inline track_filter drops every
+                            AlphaGenome track for that term — use `total RNA-seq`
+                            or leave track_filter empty.
+  total_tracks           — row count across all output types.
+
+Empty `ontology_terms` = average across every track AlphaGenome returns.
