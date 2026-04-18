@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Claude Code / Claude Desktop — local state and project instructions.
+# `.claude/` holds per-machine settings (permissions, session state, etc.);
+# `CLAUDE.md` is kept out of version control at the user's request so that
+# machine-specific/personal guidance doesn't leak upstream. Both files
+# should live locally but never be pushed.
+.claude/
+.claude.json
+CLAUDE.md
+.claudeignore
