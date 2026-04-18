@@ -348,14 +348,23 @@ def _build_base_tensor(
 
 
 def _forward_ensemble(models: list[Any], batch):
-    """Run a batch through all models and average the (B, 3, SL) outputs."""
+    """Run a batch through all models and average the (B, 3, SL) outputs.
+
+    Wrapped in `torch.no_grad()` because `torch.set_grad_enabled(False)`
+    called from `setup_spliceai` is thread-local: the background preload
+    thread disables grad only for itself, while FastMCP's HTTP request
+    handler runs on a different thread with grad still enabled. Cached
+    models get reused across threads; without this guard the resulting
+    tensors carry `requires_grad=True` and `.numpy()` raises.
+    """
     import torch
 
-    outs = []
-    for m in models:
-        o = m(batch)
-        outs.append(o[0] if isinstance(o, (tuple, list)) else o)
-    return torch.stack(outs, dim=0).mean(dim=0)
+    with torch.no_grad():
+        outs = []
+        for m in models:
+            o = m(batch)
+            outs.append(o[0] if isinstance(o, (tuple, list)) else o)
+        return torch.stack(outs, dim=0).mean(dim=0)
 
 
 def score_asos_spliceai(
