@@ -1,15 +1,8 @@
 # OligoMCP
 
-Predict antisense oligonucleotide (ASO) efficacy with **AlphaGenome** and
-**SpliceAI**, compare to experimental RT-PCR data when available, and
-drive the whole pipeline from natural language via a Claude **MCP server**
-or from the CLI.
-
-| Mode | Command | When to use |
-|---|---|---|
-| **MCP** | `claude mcp add oligomcp -- oligomcp-mcp` | Interactive, natural-language flows in Claude Code / Desktop / Cursor / … |
-| **CLI** | `oligomcp run --config foo.json` | Scripting, batch runs, reproducible experiments |
-| **Library** | `from oligomcp import run_workflow` | Embed in notebooks / pipelines |
+Predict antisense oligonucleotide (ASO) efficacy with **AlphaGenome** +
+**SpliceAI**, compare to experimental RT-PCR data, and drive the
+whole pipeline from natural language in Claude (MCP) or the CLI.
 
 ## Install
 
@@ -17,225 +10,111 @@ or from the CLI.
 git clone <this-repo>
 cd <repo>
 pip install -e .
-oligomcp init            # one-time: SpliceAI weights + AlphaGenome key prompt
+oligomcp init            # prompts for AlphaGenome key, bundles SpliceAI weights
 ```
 
-Works on Linux, macOS, and Windows. SpliceAI weights (~14 MB, MANE-10000nt)
-are bundled with the package — no `openspliceai` / `pysam` / `mappy` C
-dependencies. Genomic sequence is fetched on demand from the UCSC REST API,
-so there's no multi-GB genome download required for typical runs.
+Linux / macOS / Windows. SpliceAI weights ship with the package;
+genomic sequence is fetched on-demand from UCSC — no genome download.
 
-## Quick start — CLI
+## Use it from Claude (MCP)
 
-```bash
-# 1. One-time setup (prompts for your AlphaGenome key, or skip and add later)
-oligomcp init
-
-# 2. Run on an example config (scores 34 ASOs across SETD5 exon 11)
-oligomcp run --config config/SETD5_e1.json -v
-
-# 3. Drop AlphaGenome if you only want SpliceAI (no key needed)
-oligomcp run --config config/SETD5_e1.json --skip-alphagenome -v
-```
-
-Outputs land in `results/<gene_symbol>/` — one CSV of per-ASO scores, a
-pair of BED files per score source (compact top-20 + full), and a
-correlation PNG if `experimental_data` is provided.
-
-Minimum config — just `gene_symbol` and `exon_intervals`:
-
-```json
-{ "gene_symbol": "SETD5", "exon_intervals": [9429826, 9430051] }
-```
-
-Full schema (every optional field):
-
-```json
-{
-  "gene_symbol":      "SETD5",
-  "exon_intervals":   [9429826, 9430051],
-  "assembly":         "hg38",
-  "strand":           "+",
-  "ASO_length":       18,
-  "aso_step":         1,
-  "flank":            [200, 200],
-  "target_mode":      "exclude",
-  "requested_outputs":["RNA_SEQ", "SPLICE_SITE_USAGE"],
-  "ontology_terms":   ["CL:0000127"],
-  "experimental_data":"ASOseq_incl.csv"
-}
-```
-
-See `config/SETD5_e1.json` and `config/SMN2.json` for real examples.
-
-**Picking `ontology_terms`** — a snapshot of every CURIE AlphaGenome
-exposes (704 terms spanning cell types, tissues, cell lines, etc.) is
-committed at `data/alphagenome_ontology_terms.tsv`. Each row lists
-the CURIE, the biosample name/type/life stage, and which AlphaGenome
-output tracks it covers. Drop any CURIE (e.g. `CL:0000127`,
-`UBERON:0002240`) into the `ontology_terms` list; an empty list means
-"average over every track AlphaGenome returns". Regenerate the
-snapshot against the live API with
-`python scripts/fetch_ontology_terms.py`.
-
-## Quick start — MCP
-
-Register the stdio server with your MCP-capable client, then prompt in
-natural language. Example:
-
-> *Analyze ASO candidates targeting SETD5 exon 11 (chr3:9429826-9430051).*
-
-Claude calls `list_gene_exons("SETD5")` first to confirm the exon, then
-`predict_aso_efficacy` / `predict_aso_efficacy_inline` and surfaces
-per-ASO scores, BED file paths, and correlation stats inline.
-
-### Claude Code (CLI)
+**Register once** — Claude Code:
 
 ```bash
 claude mcp add oligomcp -- oligomcp-mcp
 ```
 
-Restart the session; the three tools appear in the toolbelt. If
-`oligomcp-mcp` isn't on the shell PATH (common with venvs / conda envs),
-pass the absolute path: `claude mcp add oligomcp -- /path/to/oligomcp-mcp`.
-
-### Claude Desktop
-
-Edit the desktop config:
-
-| OS | Path |
-|----|------|
-| Linux | `~/.config/Claude/claude_desktop_config.json` |
-| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+Other clients (Claude Desktop, Cursor, Cline, Continue, Zed, Goose,
+ChatGPT Desktop) — add this block to their MCP config file:
 
 ```json
-{
-  "mcpServers": {
-    "oligomcp": {
-      "command": "oligomcp-mcp",
-      "env": { "ALPHAGENOME_API_KEY": "your-key-here" }
-    }
-  }
-}
+{ "mcpServers": { "oligomcp": {
+  "command": "oligomcp-mcp",
+  "env": { "ALPHAGENOME_API_KEY": "your-key-here" }
+} } }
 ```
 
-Omit the `env` block if you already ran `oligomcp init` or `oligomcp
-set-api-key` — the server reads `~/.oligomcp/credentials.json` on
-startup. If the `command` isn't found, use the absolute path (find it
-with `which oligomcp-mcp`). Restart Claude Desktop.
+The `env` line is optional if you already ran `oligomcp init`. If
+`oligomcp-mcp` isn't on PATH, replace with the full path from
+`which oligomcp-mcp`.
 
-### Other MCP clients (Cursor, Cline, Continue, Zed, Goose, ChatGPT Desktop, …)
+**Then prompt naturally:**
 
-Any client that can launch a **local stdio MCP server** works. The
-block is nearly identical across clients — a `command` and optional
-`env`:
+> **"Design ASOs to skip SETD5 exon 11. Show the top 10 by SpliceAI."**
+
+> **"Score ASOs for SMN2 exon 7, restricted to motor-neuron tracks."**
+> (Claude calls `search_ontology_terms("motor neuron")` → `CL:0000100`,
+> passes it as `ontology_terms`.)
+
+> **"Run `config/SETD5_e1.json` and correlate with the experimental CSV."**
+
+> **"Just SpliceAI — I don't have an AlphaGenome key."**
+> (Claude adds `skip_alphagenome=true`.)
+
+> **"Which ontology terms cover liver RNA-seq?"**
+
+Claude chains `list_gene_exons` → `search_ontology_terms` →
+`predict_aso_efficacy{_inline}` as needed and returns per-ASO scores,
+BED file paths, and correlation stats.
+
+## Use it from the CLI
+
+```bash
+# Full AlphaGenome + SpliceAI run from a config
+oligomcp run --config config/SETD5_e1.json -v
+
+# SpliceAI-only (no AlphaGenome key needed)
+oligomcp run --config config/SETD5_e1.json --skip-alphagenome
+```
+
+Minimum config — just the gene + exon:
 
 ```json
-{
-  "oligomcp": {
-    "command": "oligomcp-mcp",
-    "env": { "ALPHAGENOME_API_KEY": "your-key-here" }
-  }
-}
+{ "gene_symbol": "SETD5", "exon_intervals": [9429826, 9430051] }
 ```
 
-Per-client paths:
+Everything else defaults. See `config/SETD5_e1.json` for a realistic
+example (custom flank, step, ontology terms, experimental CSV).
 
-- **Cursor** — `~/.cursor/mcp.json` (project: `.cursor/mcp.json`)
-- **Cline** (VS Code) — settings panel → MCP servers
-- **Continue** (VS Code / JetBrains) — `~/.continue/config.json` under `mcpServers`
-- **Zed** — `settings.json` under `context_servers`
-- **Goose** — `goose configure` → Add extension → Command-line extension
-- **ChatGPT Desktop** — Settings → Connectors → Add custom connector
-
-## MCP tools
-
-- `list_gene_exons(gene_symbol, assembly="hg38")` — canonical-transcript
-  exons via mygene.info, annotated CDS / UTR / first / last. No
-  AlphaGenome key needed.
-- `search_ontology_terms(query, output_type=None, limit=20)` —
-  substring search over the committed
-  `data/alphagenome_ontology_terms.tsv` snapshot (704 CURIEs) so the
-  MCP client can pick the right `ontology_terms` from a description
-  like "motor neuron" or "liver". Multiple whitespace-separated
-  tokens are AND'd. No AlphaGenome key needed.
-- `predict_aso_efficacy(config_path, ...)` — file-based scoring.
-  Returns `status="needs_info"` if design-critical fields
-  (`ASO_length`, `aso_step`, `flank`, `target_mode`) are missing so
-  Claude can ask the user before silently defaulting. Pass
-  `confirm_defaults=True` to accept defaults.
-- `predict_aso_efficacy_inline(gene_symbol, exon_intervals, ...)` —
-  arg-driven scoring (no config file needed), capped at 300 ASO
-  candidates per request. Returns CSV + BED content inline.
-
-## Environment variables
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `ALPHAGENOME_API_KEY` | *(unset)* | AlphaGenome key; alternative to `oligomcp set-api-key` |
-| `OLIGOMCP_SPLICEAI_N_MODELS` | `1` | Set to `5` for full-ensemble SpliceAI (slower, marginal calibration gain) |
-| `OLIGOMCP_PRELOAD_SPLICEAI` | `1` | Set to `0` to skip background model preload (faster startup, slower first call) |
-
-## How scoring works
-
-For each ASO position, the target nucleotides are masked (N for
-AlphaGenome, uniform 0.25 one-hot for SpliceAI). The perturbed sequence
-is re-scored and compared to reference via `diff_mean`:
-
-```
-score = alt[target].mean() / ref[body].mean() * alt[body].mean()
-        - ref[target].mean()
-```
-
-Three score sources are emitted, each with a different `target` slice:
-
-- **AlphaGenome RNA_SEQ** — `target` = whole exon interval (coverage
-  track; signal is distributed).
-- **AlphaGenome SPLICE_SITE_USAGE** — `target` = just the two splice
-  junctions (acceptor at `exon_start`, donor at `exon_end − 1`), since
-  the track is peaked there.
-- **SpliceAI** — same junction-only target. SpliceAI's softmax output
-  is ~0 everywhere except at canonical splice sites; averaging over the
-  full exon would dilute the signal with hundreds of near-zero bases.
-
-Positive scores = strengthens inclusion; negative = promotes skipping.
-For `target_mode="exclude"` you want the most-negative scores.
+**Picking `ontology_terms`**: all 704 AlphaGenome CURIEs are
+pre-snapshotted at `data/alphagenome_ontology_terms.tsv` — `grep` it
+or call `search_ontology_terms` from the MCP. Empty list = average
+across all tracks.
 
 ## Outputs
 
-Everything lands in `<results_dir>/<gene_symbol>/`:
+Land under `results/<gene_symbol>/`. All BED9 — usable in UCSC Genome
+Browser (upload at <https://genome.ucsc.edu/cgi-bin/hgCustom>), IGV,
+JBrowse, etc.
 
-- `<name>_ASO_scores.csv` — per-ASO scores, all sources
-- `<name>_ASO_<source>.bed` / `_full.bed` — UCSC custom tracks (red
-  gradient = inclusion-enhancing, blue = skip-promoting, saturation
-  normalized within each track)
-- `<name>_ASO_Measured.bed` — RT-PCR track (green gradient), if
-  `experimental_data` is provided
-- `<name>_correlation.png` — per-exon regression plot with
-  percentile-rank x-axis so all three tracks overlay cleanly
-- `<name>_experimental_matched.csv` — aggregated predictions ↔ measured
+| File | Contents |
+|---|---|
+| `<name>_ASO_scores.csv` | Per-ASO scores across all sources |
+| `<name>_ASO_<source>.bed` / `_full.bed` | Custom tracks — red = inclusion-enhancing, blue = skip-promoting |
+| `<name>_ASO_Measured.bed` | Green-gradient RT-PCR track (if `experimental_data` set) |
+| `<name>_correlation.png` | Per-exon regression with percentile-rank x-axis |
+| `<name>_experimental_matched.csv` | Aggregated predictions ↔ measured |
 
-To view in UCSC Genome Browser: open
-<https://genome.ucsc.edu/cgi-bin/hgCustom>, upload any of the BED files
-(or paste the BED text). The same files work directly in IGV, JBrowse,
-and most other genome viewers.
+**Sign convention**: positive score = strengthens exon inclusion;
+negative = promotes skipping. For `target_mode="exclude"`, pick the
+most-negative hits.
 
-## Package layout
+## MCP tools (4)
 
-```
-src/oligomcp/
-  config.py               OligoConfig dataclass + JSON loader
-  core.py                 Sequence utils, ASO enumeration, experimental helpers
-  predict.py              AlphaGenome + SpliceAI scoring (diff_mean)
-  output.py               BED export + per-exon correlation plot
-  resources.py            Credentials, UCSC sequence fetch, mygene.info, weights
-  workflow.py             End-to-end pipeline orchestration
-  cli.py                  CLI entrypoint (`oligomcp run`, `init`, …)
-  mcp_server.py           FastMCP server with 3 tools
-  _spliceai_model.py      Vendored SpliceAI class (openspliceai v0.0.5, MIT)
-  _spliceai_weights/*.pt  Bundled MANE-10000nt weights (~14 MB)
-```
+| Tool | Purpose |
+|---|---|
+| `list_gene_exons(gene_symbol, assembly="hg38")` | Exons of the canonical transcript. No API key. |
+| `search_ontology_terms(query, output_type=None, limit=20)` | Substring search over the 704-CURIE ontology snapshot. No API key. |
+| `predict_aso_efficacy(config_path, ...)` | File-based scoring. Returns `needs_info` if design fields missing. |
+| `predict_aso_efficacy_inline(gene_symbol, exon_intervals, ...)` | Arg-driven scoring, up to 300 candidates/request. |
+
+## Environment variables (optional)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ALPHAGENOME_API_KEY` | *(unset)* | AlphaGenome key (or use `oligomcp init` / `set-api-key`) |
+| `OLIGOMCP_SPLICEAI_N_MODELS` | `1` | Set to `5` for full-ensemble SpliceAI |
+| `OLIGOMCP_PRELOAD_SPLICEAI` | `1` | Set to `0` to skip background model preload |
 
 ## License
 
