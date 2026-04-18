@@ -31,17 +31,99 @@ queries) and stores your AlphaGenome API key at
 
 ## Quick start (MCP)
 
+After installing, register OligoMCP with whichever MCP-capable client you
+use. The server speaks the standard **stdio** transport, so any host that
+can launch a subprocess and speak MCP over stdin/stdout works — you're
+configuring different clients, not different servers.
+
+Then in any connected chat, try:
+
+> *Analyze ASO candidates targeting SETD5 exon 11.*
+
+Claude / the model will call `list_gene_exons("SETD5")`, ask you which
+exon to target, then run `predict_aso_efficacy_inline` and return scored
+candidates, a compact BED track, and a pre-loaded UCSC Genome Browser URL.
+
+### Claude Code (CLI)
+
 ```bash
 claude mcp add oligomcp -- oligomcp-mcp
 ```
 
-Then restart Claude and ask:
+Restart the session; the three tools appear in the toolbelt.
 
-> *Analyze ASO candidates targeting SETD5 exon 11.*
+### Claude Desktop
 
-Claude will call `list_gene_exons("SETD5")`, ask you which exon to target,
-then run `predict_aso_efficacy_inline` and return scored candidates, a
-compact BED track, and a pre-loaded UCSC Genome Browser URL.
+Edit the desktop config file:
+
+| OS | Path |
+|----|------|
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+
+```json
+{
+  "mcpServers": {
+    "oligomcp": {
+      "command": "oligomcp-mcp",
+      "env": { "ALPHAGENOME_API_KEY": "your-key-here" }
+    }
+  }
+}
+```
+
+Omit the `env` block if you ran `oligomcp set-api-key` — the server reads
+`~/.oligomcp/credentials.json` on startup. If `oligomcp-mcp` isn't on your
+shell PATH (common with venvs / conda envs), replace `"command"` with the
+absolute path, e.g. `"/home/you/.conda/envs/myenv/bin/oligomcp-mcp"`. Find
+it with `which oligomcp-mcp` (macOS/Linux) or `where oligomcp-mcp`
+(Windows). Restart Claude Desktop after saving.
+
+### ChatGPT Desktop (OpenAI)
+
+Recent ChatGPT Desktop versions support custom MCP connectors. Open
+**Settings → Connectors → Add custom connector** and fill in:
+
+- **Name:** `oligomcp`
+- **Command:** absolute path to `oligomcp-mcp` (use `which oligomcp-mcp`)
+- **Environment variables:** add `ALPHAGENOME_API_KEY` if you want
+  AlphaGenome scoring without passing a key per request
+
+The UI evolves; if those exact fields aren't present, look for an option
+to add a local command / stdio MCP server and reference the `oligomcp-mcp`
+binary. Consult OpenAI's current connector docs if in doubt.
+
+### Other MCP-capable clients (Cursor, Cline, Continue, Zed, Goose, …)
+
+Any client that supports launching a **local stdio MCP server** can run
+OligoMCP. The configuration usually takes the same shape across
+ecosystems — a JSON block with a `command` and optional `env` fields:
+
+```json
+{
+  "oligomcp": {
+    "command": "oligomcp-mcp",
+    "env": { "ALPHAGENOME_API_KEY": "your-key-here" }
+  }
+}
+```
+
+For example:
+
+- **Cursor** — `~/.cursor/mcp.json` (project scope: `.cursor/mcp.json`)
+- **Cline** (VS Code) — settings panel → MCP servers
+- **Continue** (VS Code / JetBrains) — `~/.continue/config.json` under `mcpServers`
+- **Zed editor** — `settings.json` under `context_servers`
+- **Goose** (Block) — `goose configure` and select "Add extension" → "Command-line extension"
+
+Environment variables the server reads on startup:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ALPHAGENOME_API_KEY` | *(unset)* | AlphaGenome key; alternatively saved via `oligomcp set-api-key` or passed per-request |
+| `OLIGOMCP_SPLICEAI_N_MODELS` | `1` | Set to `5` for full-ensemble SpliceAI scoring (slower, slightly better calibration) |
+| `OLIGOMCP_PRELOAD_SPLICEAI` | `1` | Set to `0` to disable the background model preload (faster startup, slower first SpliceAI call) |
 
 ## Tools exposed by the MCP server
 
