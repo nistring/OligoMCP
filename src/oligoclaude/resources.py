@@ -343,21 +343,52 @@ def fetch_sequence_ucsc(assembly: str, chrom: str, start: int, end: int) -> str:
 
 # ---------- SpliceAI weights ----------
 
+_BUNDLED_WEIGHTS_DIR = Path(__file__).parent / "_spliceai_weights"
+
+
 def default_spliceai_weights_dir() -> Path:
     return SPLICEAI_DIR
+
+
+def _bundled_weights_complete() -> bool:
+    """True when all 5 MANE-10000nt `.pt` files ship inside the package."""
+    return _BUNDLED_WEIGHTS_DIR.is_dir() and all(
+        (_BUNDLED_WEIGHTS_DIR / f).exists() for f in _SPLICEAI_FILES
+    )
 
 
 def ensure_spliceai_weights(
     cache_dir: Optional[Path] = None, *, verbose: bool = True
 ) -> Path:
-    """Download the MANE-10000nt 5-model ensemble if not already cached."""
-    cache_dir = Path(cache_dir) if cache_dir else SPLICEAI_DIR
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    missing = [f for f in _SPLICEAI_FILES if not (cache_dir / f).exists()]
-    if not missing:
-        if verbose:
-            print(f"Using cached SpliceAI weights: {cache_dir}")
-        return cache_dir
+    """Resolve the MANE-10000nt 5-model ensemble location.
+
+    Resolution order:
+      1. Explicit `cache_dir` if complete.
+      2. Bundled copy inside the installed package (`oligoclaude/_spliceai_weights/`)
+         — used on Prefect Horizon where FTP outbound is blocked.
+      3. User cache at `~/.oligoclaude/spliceai/mane_10000nt/`, downloading
+         any missing files from the FTP mirror.
+    """
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        missing = [f for f in _SPLICEAI_FILES if not (cache_dir / f).exists()]
+        if not missing:
+            if verbose:
+                print(f"Using cached SpliceAI weights: {cache_dir}")
+            return cache_dir
+    else:
+        if _bundled_weights_complete():
+            if verbose:
+                print(f"Using bundled SpliceAI weights: {_BUNDLED_WEIGHTS_DIR}")
+            return _BUNDLED_WEIGHTS_DIR
+        cache_dir = SPLICEAI_DIR
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        missing = [f for f in _SPLICEAI_FILES if not (cache_dir / f).exists()]
+        if not missing:
+            if verbose:
+                print(f"Using cached SpliceAI weights: {cache_dir}")
+            return cache_dir
 
     if verbose:
         print(f"Downloading {len(missing)} SpliceAI weight file(s) to {cache_dir}")

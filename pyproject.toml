@@ -44,4 +44,11 @@ oligoclaude-mcp = "oligoclaude.mcp_server:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-oligoclaude = ["py.typed"]
+oligoclaude = [
+    "py.typed",
+    # Ship the MANE-10000nt SpliceAI weight ensemble (~14 MB total) so that
+    # environments without outbound FTP — notably Prefect Horizon / FastMCP
+    # Cloud, where Lambda blocks ftp:// — can still run SpliceAI scoring
+    # without needing to fetch weights at runtime.
+    "_spliceai_weights/*.pt",
+]
