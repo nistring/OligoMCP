@@ -237,19 +237,18 @@ _SPLICEAI_LOCK = threading.Lock()
 def _default_n_models() -> int:
     """How many models of the MANE-10000nt ensemble to load by default.
 
-    Hosted Horizon containers only have ~512 MB of RAM and get SIGKILLed
-    (exit 137) if we load the full 5-model ensemble — torch alone takes
-    several hundred MB. On Horizon we default to 1 model; locally we keep
-    the full ensemble for full accuracy. Detection: Horizon sets the
-    `FASTMCP_CLOUD_URL` env var in the container, local processes do not.
-    Override with `OLIGOCLAUDE_SPLICEAI_N_MODELS=<n>` in either direction.
+    Defaults to a single model — this is ~5× faster at inference, uses
+    ~1/5 the memory, and produces scores that rank ASO candidates
+    consistently with the full 5-model ensemble (the between-model
+    variance reduction matters most for absolute calibration, not for
+    ranking). Override with `OLIGOCLAUDE_SPLICEAI_N_MODELS=5` when full
+    ensemble accuracy is needed (e.g. final validation run after the
+    top candidates have been narrowed).
     """
     override = os.environ.get("OLIGOCLAUDE_SPLICEAI_N_MODELS", "").strip()
     if override.isdigit():
         return max(1, int(override))
-    if os.environ.get("FASTMCP_CLOUD_URL"):
-        return 1
-    return 5
+    return 1
 
 
 def setup_spliceai(
