@@ -12,30 +12,17 @@ Exposed four ways:
 
 ## Install
 
-### Linux / macOS
-
 ```bash
 git clone <this-repo>
 cd OligoClaude
-pip install -e ".[spliceai]"          # AlphaGenome + SpliceAI
-pip install -e .                       # AlphaGenome only (skip SpliceAI)
+pip install -e .
 ```
 
-### Windows
-
-The SpliceAI stack (`openspliceai`) transitively depends on `pysam`, which has
-no Windows wheels. Install the SpliceAI model code without its pysam-dependent
-CLI:
-
-```powershell
-git clone <this-repo>
-cd OligoClaude
-pip install openspliceai --no-deps     # pulls the pure-torch model class only
-pip install -e .                       # all other deps
-```
-
-OligoClaude only imports the pysam-free path
-`openspliceai.train_base.openspliceai.SpliceAI`, so `--no-deps` is enough.
+Works on Linux, macOS, and Windows with no extra steps. OligoClaude vendors
+the pure-torch SpliceAI class from OpenSpliceAI (see
+`src/oligoclaude/_spliceai_model.py` for MIT attribution), so it doesn't
+depend on the `openspliceai` package or its C-extension transitive deps
+(`mappy`, `pysam`). Only the pretrained weights are fetched at runtime.
 
 For unit tests: `pip install -e .[dev]`
 

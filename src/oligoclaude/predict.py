@@ -223,47 +223,26 @@ def score_asos_alphagenome(
 # ============================================================
 
 _MANE_10000_L = 32
-# W and AR must be numpy arrays — the openspliceai constructor does
+# W and AR are numpy arrays — the SpliceAI constructor does
 # `np.sum(AR * (W - 1))` which requires element-wise ops, not list arithmetic.
 _MANE_10000_W = np.array([11] * 8 + [21] * 4 + [41] * 4, dtype=np.int64)
 _MANE_10000_AR = np.array([1] * 4 + [4] * 4 + [10] * 4 + [25] * 4, dtype=np.int64)
 
 
-def _instantiate_spliceai(SpliceAI_cls):
-    """Instantiate SpliceAI across known constructor signatures.
-
-    `openspliceai>=0.0.5` uses `SpliceAI(L, W, AR, apply_softmax=True)` with
-    the MANE-10000nt arrays defined in
-    `openspliceai/train/train.py::initialize_model_and_optim`. Older
-    signatures are probed as fallbacks; all collected errors are surfaced
-    so the real failure isn't hidden behind the last fallback's error.
-    """
-    attempts = (
-        ("MANE-10000nt positional", (_MANE_10000_L, _MANE_10000_W, _MANE_10000_AR), {}),
-        ("MANE-10000nt + apply_softmax", (_MANE_10000_L, _MANE_10000_W, _MANE_10000_AR), {"apply_softmax": True}),
-        ("legacy L=CL_MAX kwarg", (), {"L": CL_MAX}),
-        ("legacy flanking_size kwarg", (), {"flanking_size": CL_MAX}),
-        ("no-args", (), {}),
-    )
-    errors: list[str] = []
-    for label, args, kwargs in attempts:
-        try:
-            return SpliceAI_cls(*args, **kwargs)
-        except (TypeError, ValueError) as e:
-            errors.append(f"  [{label}]: {type(e).__name__}: {e}")
-    joined = "\n".join(errors)
-    raise RuntimeError(
-        f"Could not instantiate SpliceAI class. Attempts:\n{joined}\n"
-        "Please report your openspliceai version (`pip show openspliceai`)."
-    )
-
-
 def setup_spliceai(
     threads: Optional[int] = None, weights_dir: Optional[Path] = None
 ) -> tuple[list[Any], Any]:
-    """Load the MANE-10000nt 5-model ensemble on CPU (pysam-free import path)."""
+    """Load the MANE-10000nt 5-model ensemble on CPU.
+
+    Uses the vendored `SpliceAI` class from `oligoclaude._spliceai_model`
+    (copied from openspliceai v0.0.5, MIT), so we avoid pulling in the
+    `openspliceai` package and its C-extension transitive deps (`mappy`,
+    `pysam`). Pretrained weights come from the OpenSpliceAI MANE-10000nt
+    release and load into the vendored class unchanged.
+    """
     import torch
 
+    from ._spliceai_model import SpliceAI
     from .resources import ensure_spliceai_weights
 
     torch.set_num_threads(threads or max(1, (os.cpu_count() or 2) // 2))
@@ -275,18 +254,9 @@ def setup_spliceai(
     if not pt_files:
         raise RuntimeError(f"No .pt weight files found in {weights_dir}.")
 
-    try:
-        from openspliceai.train_base.openspliceai import SpliceAI  # type: ignore
-    except ImportError as e:
-        raise RuntimeError(
-            "Could not import `openspliceai.train_base.openspliceai.SpliceAI`. "
-            "On Windows: `pip install openspliceai --no-deps` (pysam has no "
-            "Windows wheels). On Linux/macOS: `pip install openspliceai`."
-        ) from e
-
     models: list[Any] = []
     for pt in pt_files:
-        m = _instantiate_spliceai(SpliceAI)
+        m = SpliceAI(_MANE_10000_L, _MANE_10000_W, _MANE_10000_AR)
         state = torch.load(pt, map_location=device)
         if isinstance(state, dict) and "state_dict" in state:
             state = state["state_dict"]
