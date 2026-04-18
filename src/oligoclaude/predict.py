@@ -234,16 +234,36 @@ _SPLICEAI_CACHE: dict[str, tuple[list[Any], Any]] = {}
 _SPLICEAI_LOCK = threading.Lock()
 
 
+def _default_n_models() -> int:
+    """How many models of the MANE-10000nt ensemble to load by default.
+
+    Hosted Horizon containers only have ~512 MB of RAM and get SIGKILLed
+    (exit 137) if we load the full 5-model ensemble — torch alone takes
+    several hundred MB. On Horizon we default to 1 model; locally we keep
+    the full ensemble for full accuracy. Detection: Horizon sets the
+    `FASTMCP_CLOUD_URL` env var in the container, local processes do not.
+    Override with `OLIGOCLAUDE_SPLICEAI_N_MODELS=<n>` in either direction.
+    """
+    override = os.environ.get("OLIGOCLAUDE_SPLICEAI_N_MODELS", "").strip()
+    if override.isdigit():
+        return max(1, int(override))
+    if os.environ.get("FASTMCP_CLOUD_URL"):
+        return 1
+    return 5
+
+
 def setup_spliceai(
     threads: Optional[int] = None, weights_dir: Optional[Path] = None
 ) -> tuple[list[Any], Any]:
-    """Load (or retrieve cached) MANE-10000nt 5-model ensemble on CPU.
+    """Load (or retrieve cached) MANE-10000nt model ensemble on CPU.
 
     Loaded models are cached at module level and reused across calls —
-    critical for remote HTTP deployments where reloading 5 × ~3 MB
-    checkpoints per request (~5-10 s) blows through MCP tool-call
-    timeouts. Thread-safe via double-checked locking (FastMCP's HTTP
-    transport may dispatch requests from multiple threads).
+    critical for remote HTTP deployments where reloading checkpoints per
+    request (~5-10 s per model) blows through MCP tool-call timeouts.
+    Thread-safe via double-checked locking.
+
+    Number of models loaded is determined by `_default_n_models()` (see
+    docstring): 5 locally, 1 on Horizon, override via env var.
 
     Uses the vendored `SpliceAI` class from `oligoclaude._spliceai_model`
     (copied from openspliceai v0.0.5, MIT), so we avoid pulling in the
@@ -255,7 +275,8 @@ def setup_spliceai(
     from .resources import ensure_spliceai_weights
 
     weights_dir = ensure_spliceai_weights(weights_dir)
-    cache_key = str(Path(weights_dir).resolve())
+    n_models = _default_n_models()
+    cache_key = f"{Path(weights_dir).resolve()}|n={n_models}"
 
     cached = _SPLICEAI_CACHE.get(cache_key)
     if cached is not None:
@@ -270,9 +291,11 @@ def setup_spliceai(
         torch.set_grad_enabled(False)
         device = torch.device("cpu")
 
-        pt_files = sorted(Path(weights_dir).glob("*.pt"))
+        pt_files = sorted(Path(weights_dir).glob("*.pt"))[:n_models]
         if not pt_files:
             raise RuntimeError(f"No .pt weight files found in {weights_dir}.")
+
+        print(f"SpliceAI: loading {len(pt_files)}-model ensemble from {weights_dir}")
 
         models: list[Any] = []
         for pt in pt_files:
