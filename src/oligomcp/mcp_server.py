@@ -14,18 +14,18 @@ Tools exposed:
 
 - `predict_aso_efficacy_inline(gene_symbol, exon_intervals, ...)` — run
   the full workflow from tool arguments (no config file, no disk).
-  Accepts an optional `alphagenome_api_key` per call; returns CSV + BED
-  content + UCSC URL inline. Convenient whenever you'd rather describe
-  the run in tool arguments than maintain a JSON config.
+  Returns CSV + BED content inline. Convenient whenever you'd rather
+  describe the run in tool arguments than maintain a JSON config.
 
 - `predict_aso_efficacy(config_path, ...)` — traditional file-based
   workflow; reproducible local runs driven from a JSON config.
 
-Credential resolution:
-    1. `alphagenome_api_key` tool argument (per-request, in-memory)
-    2. $ALPHAGENOME_API_KEY environment variable
-    3. ~/.oligomcp/credentials.json (saved via `oligomcp set-api-key`)
-    4. Legacy `dna_api_key` field inside the config JSON (discouraged)
+Both scoring tools emit BED9 files suitable for manual upload to UCSC
+Genome Browser's `hgCustom` page, IGV, JBrowse, or any other viewer.
+
+AlphaGenome API key resolution: set $ALPHAGENOME_API_KEY in the server's
+environment before launch. SpliceAI-only runs (skip_alphagenome=True)
+need no key.
 """
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ from typing import Optional
 # this thread". v2 instances take the native code path and work everywhere.
 from fastmcp import FastMCP
 
+from .config import missing_opinionated_fields
 from .resources import ENV_VAR, get_alphagenome_api_key
 from .workflow import ExonIntervalsRequired, WorkflowResult, run_workflow
 
@@ -200,7 +201,6 @@ def predict_aso_efficacy_inline(
     target_mode: str = "exclude",
     skip_alphagenome: bool = True,
     skip_spliceai: bool = False,
-    alphagenome_api_key: Optional[str] = None,
     samples_max: int = 20,
     requested_outputs: Optional[list[str]] = None,
     ontology_terms: Optional[list[str]] = None,
@@ -230,11 +230,10 @@ def predict_aso_efficacy_inline(
         flank: `[upstream, downstream]` flank around the exon (default 200/200).
         target_mode: "exclude" (skip the exon) or "include".
         skip_alphagenome: Default True — SpliceAI-only is self-contained.
-            Set False and pass `alphagenome_api_key` to also score via
-            AlphaGenome (hosted API, counts against your quota).
+            Set False to also score via AlphaGenome (hosted API, counts
+            against your quota; requires $ALPHAGENOME_API_KEY in the
+            server environment).
         skip_spliceai: Skip SpliceAI scoring (CPU-heavy ~0.25s/candidate).
-        alphagenome_api_key: Your AlphaGenome key, used only for this request.
-            Ignored when skip_alphagenome=True.
         samples_max: Top/bottom ASOs to include in the compact BED (default 20).
         requested_outputs: AlphaGenome output types; defaults to
             ["RNA_SEQ", "SPLICE_SITE_USAGE"].
@@ -247,9 +246,8 @@ def predict_aso_efficacy_inline(
         scores: list of per-ASO dicts (aso_id, position, length, sequences, scores)
         top_candidates: dict {source: [{aso_id, position, score, sequence}, ...]}
             — samples_max top hits per source.
-        bed_tracks: dict {filename: bed_text} for UCSC upload (compact only).
-        ucsc_url: Full URL that preloads the compact BED tracks on UCSC.
-        gene_info: {chrom, strand, transcript} derived from mygene.info.
+        bed_tracks: dict {filename: bed_text} (compact BED, for manual upload
+            to UCSC / IGV / JBrowse).
     """
     if flank is None:
         flank = [200, 200]
@@ -278,89 +276,73 @@ def predict_aso_efficacy_inline(
             ),
         }
 
-    restore_key: Optional[str] = None
-    had_key = ENV_VAR in os.environ
-    if alphagenome_api_key and not skip_alphagenome:
-        restore_key = os.environ.get(ENV_VAR)
-        os.environ[ENV_VAR] = alphagenome_api_key
+    with tempfile.TemporaryDirectory(prefix="oligomcp_") as tmp:
+        tmpdir = Path(tmp)
+        cfg_data = {
+            "gene_symbol": gene_symbol,
+            "exon_intervals": list(exon_intervals),
+            "assembly": assembly,
+            "strand": strand,
+            "ASO_length": aso_length,
+            "aso_step": aso_step,
+            "flank": list(flank),
+            "target_mode": target_mode,
+            "results_dir": str(tmpdir / "results"),
+            "data_dir": str(tmpdir),
+            "gtf_url": _DEFAULT_GTF_URL,
+            "ontology_terms": ontology_terms,
+            "requested_outputs": requested_outputs,
+            "track_filter": track_filter,
+        }
+        cfg_path = tmpdir / "inline_config.json"
+        cfg_path.write_text(json.dumps(cfg_data))
 
-    try:
-        with tempfile.TemporaryDirectory(prefix="oligomcp_") as tmp:
-            tmpdir = Path(tmp)
-            cfg_data = {
-                "gene_symbol": gene_symbol,
-                "exon_intervals": list(exon_intervals),
-                "assembly": assembly,
-                "strand": strand,
-                "ASO_length": aso_length,
-                "aso_step": aso_step,
-                "flank": list(flank),
-                "target_mode": target_mode,
-                "results_dir": str(tmpdir / "results"),
-                "data_dir": str(tmpdir),
-                "gtf_url": _DEFAULT_GTF_URL,
-                "ontology_terms": ontology_terms,
-                "requested_outputs": requested_outputs,
-                "track_filter": track_filter,
-            }
-            cfg_path = tmpdir / "inline_config.json"
-            cfg_path.write_text(json.dumps(cfg_data))
-
-            try:
-                result: WorkflowResult = run_workflow(
-                    cfg_path,
-                    skip_alphagenome=skip_alphagenome,
-                    skip_spliceai=skip_spliceai,
-                    samples_max=samples_max,
-                    open_browser=False,
-                )
-            except ExonIntervalsRequired as e:
-                return {
-                    "status": "exon_intervals_required",
-                    "message": str(e),
-                }
-
-            scores = _scores_from_csv(result.scores_csv)
-            compact_beds = {
-                p.name: p.read_text()
-                for p in result.bed_files
-                if p.exists() and not p.name.endswith("_full.bed")
-            }
-
-            score_cols = [
-                c for c in (scores[0].keys() if scores else [])
-                if c not in {"aso_id", "ASO_sequence", "ASO_antisense", "position",
-                             "length", "Measured (RT-PCR)", "Region (Exon)"}
-            ]
-            top: dict[str, list[dict]] = {}
-            for col in score_cols:
-                valid = [s for s in scores if s.get(col) is not None]
-                ranked = sorted(valid, key=lambda s: -abs(float(s[col])))
-                top[col] = [
-                    {
-                        "aso_id": s["aso_id"],
-                        "position": s["position"],
-                        "score": float(s[col]),
-                        "ASO_antisense": s.get("ASO_antisense"),
-                    }
-                    for s in ranked[:samples_max]
-                ]
-
+        try:
+            result: WorkflowResult = run_workflow(
+                cfg_path,
+                skip_alphagenome=skip_alphagenome,
+                skip_spliceai=skip_spliceai,
+                samples_max=samples_max,
+            )
+        except ExonIntervalsRequired as e:
             return {
-                "status": "ok",
-                "n_candidates": result.n_candidates,
-                "scores": scores,
-                "top_candidates": top,
-                "bed_tracks": compact_beds,
-                "ucsc_url": result.ucsc_url,
-                "ucsc_instructions": result.ucsc_instructions,
+                "status": "exon_intervals_required",
+                "message": str(e),
             }
-    finally:
-        if alphagenome_api_key and not skip_alphagenome:
-            if restore_key is None and not had_key:
-                os.environ.pop(ENV_VAR, None)
-            elif restore_key is not None:
-                os.environ[ENV_VAR] = restore_key
+
+        scores = _scores_from_csv(result.scores_csv)
+        compact_beds = {
+            p.name: p.read_text()
+            for p in result.bed_files
+            if p.exists() and not p.name.endswith("_full.bed")
+        }
+
+        score_cols = [
+            c for c in (scores[0].keys() if scores else [])
+            if c not in {"aso_id", "ASO_sequence", "ASO_antisense", "position",
+                         "length", "Measured (RT-PCR)", "Region (Exon)"}
+        ]
+        top: dict[str, list[dict]] = {}
+        for col in score_cols:
+            valid = [s for s in scores if s.get(col) is not None]
+            ranked = sorted(valid, key=lambda s: -abs(float(s[col])))
+            top[col] = [
+                {
+                    "aso_id": s["aso_id"],
+                    "position": s["position"],
+                    "score": float(s[col]),
+                    "ASO_antisense": s.get("ASO_antisense"),
+                }
+                for s in ranked[:samples_max]
+            ]
+
+        return {
+            "status": "ok",
+            "n_candidates": result.n_candidates,
+            "scores": scores,
+            "top_candidates": top,
+            "bed_tracks": compact_beds,
+        }
 
 
 @mcp.tool()
@@ -369,6 +351,7 @@ def predict_aso_efficacy(
     skip_alphagenome: bool = False,
     skip_spliceai: bool = False,
     samples_max: int = 20,
+    confirm_defaults: bool = False,
 ) -> dict:
     """Predict ASO efficacy from a JSON config file.
 
@@ -383,15 +366,38 @@ def predict_aso_efficacy(
         skip_alphagenome: Skip AlphaGenome scoring (no API key needed).
         skip_spliceai: Skip SpliceAI scoring.
         samples_max: Top/bottom ASOs per compact BED track.
+        confirm_defaults: When False (default), the tool returns
+            `status="needs_info"` if the JSON omits any design-critical
+            field (ASO_length, aso_step, flank, target_mode) so Claude can
+            ask the user before silently applying a default. Set True to
+            skip the check and accept the baked-in defaults.
 
     Returns:
-        status: "ok" | "exon_intervals_required"
-        scores_csv, bed_files, correlation_plot: server-side paths.
-        stats, ucsc_instructions, ucsc_url, n_candidates.
+        status: "ok" | "needs_info" | "exon_intervals_required"
+        On "needs_info": `missing_fields` lists `{name, default, description}`
+            entries and `config_path` points at the JSON to update.
+        On "ok": scores_csv, bed_files, correlation_plot (server-side
+            paths), stats, n_candidates.
     """
     cfg_path = Path(config_path).expanduser().resolve()
     if not cfg_path.exists():
         raise FileNotFoundError(f"Config file not found: {cfg_path}")
+
+    if not confirm_defaults:
+        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        missing = missing_opinionated_fields(raw)
+        if missing:
+            return {
+                "status": "needs_info",
+                "config_path": str(cfg_path),
+                "missing_fields": missing,
+                "hint": (
+                    "These fields aren't set in the config. Ask the user to "
+                    "confirm the default or provide a different value for each "
+                    "one, then add them to the JSON and re-invoke. To accept "
+                    "all defaults in one shot, pass confirm_defaults=true."
+                ),
+            }
 
     try:
         result: WorkflowResult = run_workflow(
@@ -399,7 +405,6 @@ def predict_aso_efficacy(
             skip_alphagenome=skip_alphagenome,
             skip_spliceai=skip_spliceai,
             samples_max=samples_max,
-            open_browser=False,
         )
     except ExonIntervalsRequired as e:
         return {
@@ -420,24 +425,16 @@ def predict_aso_efficacy(
             str(result.correlation_plot) if result.correlation_plot else None
         ),
         "stats": _stats_to_json(result.stats),
-        "ucsc_instructions": result.ucsc_instructions,
-        "ucsc_url": result.ucsc_url,
         "n_candidates": result.n_candidates,
     }
 
 
 def _check_startup_credentials() -> None:
-    """Print a one-line stderr advisory if no AlphaGenome key is configured.
-
-    Remote callers can still pass `alphagenome_api_key` per request; this
-    check only catches the common local-misconfig case.
-    """
+    """Print a one-line stderr advisory if no AlphaGenome key is configured."""
     if get_alphagenome_api_key() is None:
         sys.stderr.write(
             "[oligomcp-mcp] WARNING: no AlphaGenome API key in env/file.\n"
-            f"  Local: set ${ENV_VAR} or run `oligomcp set-api-key <KEY>`.\n"
-            "  Remote: pass `alphagenome_api_key` per request to "
-            "`predict_aso_efficacy_inline`.\n"
+            f"  Set ${ENV_VAR} or run `oligomcp set-api-key <KEY>`.\n"
             "  SpliceAI-only runs (skip_alphagenome=true) work without a key.\n"
         )
 

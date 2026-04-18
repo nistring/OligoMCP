@@ -13,10 +13,8 @@
     "SPLICE_SITE_USAGE"
   ],
   "exon_intervals": [9433369, 9433562],
-  "_exon_comment": "Use 'exon_index' (int) to select by transcript exon number, OR 'exon_sequence' (str) to search by genomic sequence",
   "flank": [200, 200],
   "strand": "+",
   "_resize_comment": "Optional: manually specify resize_width (16384, 131072, 524288, or 1048576). If omitted, auto-selected based on gene length",
-  "_viz_resize_width_comment": "Optional: specify viz_resize_width for visualization (default: 32768)",
   "ASO_length": 18
 }

@@ -25,11 +25,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Top/bottom ASOs to emit in compact BED (does not affect correlation).",
     )
     r.add_argument("--verbose", "-v", action="store_true")
-    r.add_argument(
-        "--no-browser",
-        action="store_true",
-        help="Do not auto-open the UCSC Genome Browser after scoring.",
-    )
 
     i = sub.add_parser(
         "init",
@@ -74,15 +69,15 @@ def _cmd_run(args) -> int:
         skip_spliceai=args.skip_spliceai,
         samples_max=args.samples_max,
         verbose=args.verbose,
-        open_browser=not args.no_browser,
     )
     print()
     print(f"Candidates scored: {result.n_candidates}")
-    print(f"Scores CSV: {result.scores_csv}")
+    print(f"Scores CSV:        {result.scores_csv}")
     if result.correlation_plot:
-        print(f"Correlation plot: {result.correlation_plot}")
-    print()
-    print(result.ucsc_instructions)
+        print(f"Correlation plot:  {result.correlation_plot}")
+    print("BED files:")
+    for p in result.bed_files:
+        print(f"  - {p}")
     return 0
 
 

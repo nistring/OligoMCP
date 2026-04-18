@@ -2,10 +2,21 @@
 
 Both backends score each ASO candidate by how much a masked variant
 (`N` block for AlphaGenome, uniform 0.25 one-hot for SpliceAI) perturbs
-exon usage relative to gene-body baseline:
+exon usage relative to a gene-body baseline:
 
-    diff_mean = alt[exon].mean() / ref[body].mean() * alt[body].mean()
-                - ref[exon].mean()
+    diff_mean = alt[target].mean() / ref[body].mean() * alt[body].mean()
+                - ref[target].mean()
+
+where `target` means different things for different output tracks:
+
+  - AlphaGenome RNA_SEQ: the whole target exon interval.
+  - AlphaGenome SPLICE_SITE_USAGE: same interval, but the track is
+    already peaked at the donor/acceptor so the mean captures mostly
+    junction signal.
+  - SpliceAI: only the two splice junctions (acceptor at exon_start,
+    donor at exon_end-1). SpliceAI's softmax output is ~0 everywhere
+    except at canonical splice sites, so averaging over the full exon
+    would dilute the real signal with ~200+ near-zero bases.
 
 AlphaGenome evaluates this over a resized gene interval via its hosted
 `predict_sequences` API. SpliceAI runs the OpenSpliceAI MANE-10000nt
@@ -47,6 +58,27 @@ def diff_mean(
         alt[start:end].mean(0) / ref[gene_start:gene_end].mean(0)
         * alt[gene_start:gene_end].mean(0)
         - ref[start:end].mean(0)
+    )
+
+
+def diff_mean_at(
+    ref: np.ndarray,
+    alt: np.ndarray,
+    target_indices: np.ndarray,
+    gene_start: int,
+    gene_end: int,
+) -> np.ndarray:
+    """`diff_mean` where the target region is an arbitrary set of indices.
+
+    Used for junction-only splice scoring: instead of averaging a
+    splice-site-usage track over the whole exon (which dilutes peaked
+    junction signal with ~200 near-zero bases), we take the mean at
+    just the acceptor and donor positions.
+    """
+    return (
+        alt[target_indices].mean(0) / ref[gene_start:gene_end].mean(0)
+        * alt[gene_start:gene_end].mean(0)
+        - ref[target_indices].mean(0)
     )
 
 
@@ -207,17 +239,27 @@ def score_asos_alphagenome(
             print(f"Skipping {output_type.name}: missing reference output")
             continue
 
-        results[output_type.name] = np.asarray(
-            diff_mean(
-                ref_td.values.mean(axis=1)[:, None],
-                np.stack(variant_cols, axis=1),
-                ctx.exon_start_rel,
-                ctx.exon_end_rel,
-                ctx.gene_start_rel,
-                ctx.gene_end_rel,
-            ),
-            dtype=np.float32,
-        )
+        ref_arr = ref_td.values.mean(axis=1)[:, None]
+        alt_arr = np.stack(variant_cols, axis=1)
+
+        # SPLICE_SITE_USAGE is peaked at the donor/acceptor — averaging
+        # over the full exon dilutes the real signal with ~200 near-zero
+        # bases, same reason SpliceAI now scores only at junctions.
+        if output_type.name == "SPLICE_SITE_USAGE":
+            junction_idx = np.array(
+                [ctx.exon_start_rel, ctx.exon_end_rel - 1], dtype=int
+            )
+            raw = diff_mean_at(
+                ref_arr, alt_arr, junction_idx,
+                ctx.gene_start_rel, ctx.gene_end_rel,
+            )
+        else:
+            raw = diff_mean(
+                ref_arr, alt_arr,
+                ctx.exon_start_rel, ctx.exon_end_rel,
+                ctx.gene_start_rel, ctx.gene_end_rel,
+            )
+        results[output_type.name] = np.asarray(raw, dtype=np.float32)
     return results
 
 
@@ -392,7 +434,13 @@ def score_asos_spliceai(
 
     ref_out = _forward_ensemble(models, base_tensor)
     ref_signal = (ref_out[0, 1] + ref_out[0, 2]).cpu().numpy().astype(np.float32)
-    ref_exon_mean = float(ref_signal[exon_a:exon_b].mean())
+    # SpliceAI's softmaxed acceptor+donor probability is near 0 everywhere
+    # except at canonical splice sites. Averaging over the 200+ bp exon
+    # therefore dilutes the real junction signal. Score only the two
+    # junctions of the target exon: acceptor at exon_start (first exonic
+    # base), donor at exon_end-1 (last exonic base).
+    junction_idx = np.array([exon_a, exon_b - 1], dtype=int)
+    ref_junction_mean = float(ref_signal[junction_idx].mean())
     ref_sl_mean = float(ref_signal.mean())
 
     scores = np.zeros(len(candidates), dtype=np.float32)
@@ -420,10 +468,10 @@ def score_asos_spliceai(
         alt_signal = (alt_out[:, 1] + alt_out[:, 2]).cpu().numpy().astype(np.float32)
 
         batch_scores = (
-            alt_signal[:, exon_a:exon_b].mean(axis=1)
+            alt_signal[:, junction_idx].mean(axis=1)
             / (ref_sl_mean + 1e-12)
             * alt_signal.mean(axis=1)
-            - ref_exon_mean
+            - ref_junction_mean
         )
         batch_scores[~valid] = np.nan
         scores[start : start + B] = batch_scores.astype(np.float32)

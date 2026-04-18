@@ -1,16 +1,16 @@
-"""Output writers: BED custom tracks for UCSC + per-exon correlation plots.
+"""Output writers: BED custom tracks + per-exon correlation plots.
 
-Both writers consume the same `candidates` + `scores` payload produced by
-`predict.py`. BED export produces a compact (top/bottom 20) file and a full
-file per score source; the correlation plot overlays one regression line
-per score source per exon panel, plus an "all-exons" panel when multiple
-exons are present. `open_ucsc_browser` auto-uploads compact BED tracks to
-the UCSC Genome Browser via `hgct_customText` URL parameter.
+Two output stages consume the same `candidates` + `scores` payload from
+`predict.py`:
+
+  - `export_all` / `write_experimental_bed` — BED9 files (one compact, one
+    full per score source) suitable for manual upload via UCSC's
+    `hgCustom` page, IGV, JBrowse, or any genome viewer.
+  - `correlation_plot` — per-exon scatter/regression panels comparing
+    each score source against the experimental Measured value.
 """
 from __future__ import annotations
 
-import urllib.parse
-import webbrowser
 from pathlib import Path
 from typing import Optional
 
@@ -41,13 +41,31 @@ def _build_rows(
 
     cands, scores = zip(*selected)
     scores_arr = np.asarray(scores, dtype=np.float32)
-    vals = np.clip((1 + scores_arr if invert else 1 - scores_arr) * 255, 1, 255).astype(int)
+
+    # Normalize |score| within this batch (per track, per invert-group) so the
+    # strongest hit saturates (channel=0, pure red/blue) and weaker hits fade
+    # to white. Using raw magnitude would collapse low-magnitude tracks like
+    # SPLICE_SITE_USAGE (|score| ≤ ~0.006) to near-white (channel ≈ 254),
+    # making them invisible on UCSC's white canvas.
+    abs_scores = np.abs(scores_arr)
+    max_abs = float(abs_scores.max()) if abs_scores.size else 0.0
+    if max_abs > 0:
+        sat = abs_scores / max_abs  # 0..1, 1 = strongest
+        vals = np.clip((1 - sat) * 255, 1, 255).astype(int)
+    else:
+        vals = np.full(len(cands), 255, dtype=int)
     if invert:
         item_rgb = [f"{int(v)},{int(v)},255" for v in vals]
         label = "bottom"
     else:
         item_rgb = [f"255,{int(v)},{int(v)}" for v in vals]
         label = "top"
+
+    # BED score column must be integer 0..1000; UCSC silently rejects the track
+    # otherwise. Use the same normalized saturation so the score column and
+    # the RGB gradient stay in sync.
+    score_col = (abs_scores / max_abs * 1000).astype(int) if max_abs > 0 else np.zeros(len(cands), dtype=int)
+    score_col = np.clip(score_col, 0, 1000)
 
     starts = [anchor + c.position for c in cands]
     ends = [anchor + c.position + c.length for c in cands]
@@ -59,7 +77,7 @@ def _build_rows(
             "chromStart": starts,
             "chromEnd": ends,
             "name": names,
-            "score": scores_arr,
+            "score": score_col,
             "strand": [bed_strand] * len(cands),
             "thickStart": starts,
             "thickEnd": ends,
@@ -119,13 +137,15 @@ def write_bed(
     _write_track(
         compact_path,
         f'track name={config_name}_ASO_{source} '
-        f'description="ASO scores for {source}" visibility="pack" useScore=1',
+        f'description="ASO scores for {source}" visibility="pack" useScore=1 '
+        f'itemRgb="On"',
         compact_df,
     )
     _write_track(
         full_path,
         f'track name={config_name}_ASO_{source}_full '
-        f'description="Full ASO scores for {source}" visibility="pack" useScore=1',
+        f'description="Full ASO scores for {source}" visibility="pack" useScore=1 '
+        f'itemRgb="On"',
         full_df,
     )
     return compact_path, full_path
@@ -212,59 +232,6 @@ def write_experimental_bed(
     return path
 
 
-def build_ucsc_url(
-    assembly: str,
-    chrom: str,
-    exon_start: int,
-    exon_end: int,
-    flank: tuple[int, int],
-    bed_files: list[Path],
-) -> Optional[str]:
-    """Build a UCSC Genome Browser URL with compact BED tracks embedded.
-
-    Reads the compact (non-full) BED files and URL-encodes their content
-    into the `hgct_customText` parameter. Returns the URL, or None if
-    there are no compact tracks to embed.
-    """
-    compact_files = [f for f in bed_files if not f.name.endswith("_full.bed")]
-    if not compact_files:
-        return None
-
-    bed_content = "\n".join(f.read_text().rstrip() for f in compact_files if f.exists())
-    if not bed_content.strip():
-        return None
-
-    position = f"{chrom}:{exon_start - flank[0]}-{exon_end + flank[1]}"
-    params = urllib.parse.urlencode({
-        "db": assembly,
-        "position": position,
-        "hgct_customText": bed_content,
-    })
-    return f"https://genome.ucsc.edu/cgi-bin/hgTracks?{params}"
-
-
-def open_ucsc_browser(
-    assembly: str,
-    chrom: str,
-    exon_start: int,
-    exon_end: int,
-    flank: tuple[int, int],
-    bed_files: list[Path],
-) -> Optional[str]:
-    """Build the UCSC URL and attempt to open it in the default browser.
-
-    Returns the URL even if the browser-open fails (e.g. headless env).
-    """
-    url = build_ucsc_url(assembly, chrom, exon_start, exon_end, flank, bed_files)
-    if not url:
-        return None
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
-    return url
-
-
 # ---------- Correlation plot ----------
 
 def _safe_corr(x: pd.Series, y: pd.Series):
@@ -288,14 +255,24 @@ def correlation_plot(
     measured_col: str,
     out_png: Path,
     exon_col: Optional[str] = "Region (Exon)",
-    include_combined: bool = True,
 ) -> dict:
     """Render per-exon regression panels with one line per score source.
 
-    Scores are min-max normalized per panel to share a common x-axis;
-    correlations are computed on raw values. When `include_combined=True`
-    and multiple exons are present, an additional "all" panel pools the
-    samples. Returns `{panel: {source: (pearson_r, pearson_p, spearman_rho, spearman_p)}}`.
+    No cross-exon "all" panel: correlations across different target
+    exons aren't meaningful (each exon has its own measured scale and
+    splicing context).
+
+    The x-axis is a **percentile rank** (rank / N within each score
+    column), not the raw or min-max-normalized value. The three
+    backends (AlphaGenome RNA_SEQ, SPLICE_SITE_USAGE, SpliceAI)
+    output on wildly different absolute scales, but when their
+    rankings agree, each ASO's rank-position is nearly identical
+    across tracks — so the scatter clouds overlap and the agreement
+    is visually obvious. Rank plotting also makes the regression
+    line slope match Spearman ρ's sign/intensity directly.
+    Correlations are still computed on raw values.
+
+    Returns `{panel: {source: (pearson_r, pearson_p, spearman_rho, spearman_p)}}`.
     """
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -303,8 +280,6 @@ def correlation_plot(
     if exon_col and exon_col in matched_df.columns:
         exons = sorted(matched_df[exon_col].dropna().unique().tolist())
         panels = [(str(e), matched_df[matched_df[exon_col] == e].copy()) for e in exons]
-        if include_combined and len(exons) > 1:
-            panels.append(("all", matched_df.copy()))
     else:
         panels = [("all", matched_df.copy())]
     if not panels:
@@ -317,18 +292,18 @@ def correlation_plot(
     for ax, (panel_name, sub) in zip(axes[0], panels):
         stats_out[panel_name] = {}
         if len(sub) < 3:
-            ax.set_title(f"{panel_name} (n={len(sub)}, too few)")
+            ax.set_title(f"Exon {panel_name} (n={len(sub)}, too few)")
             continue
 
-        for col in score_columns:
-            if col not in sub.columns:
-                continue
-            lo, hi = sub[col].min(), sub[col].max()
-            sub[f"{col}_norm"] = (sub[col] - lo) / (hi - lo) if hi > lo else 0.0
+        present_cols = [c for c in score_columns if c in sub.columns]
 
-        for i, col in enumerate(score_columns):
-            if col not in sub.columns:
-                continue
+        # Percentile-rank each score column independently. With `method='average'`
+        # ties share a position; `pct=True` returns rank/N in (0, 1]. Agreeing
+        # tracks collapse onto each other; disagreement shows as horizontal spread.
+        for col in present_cols:
+            sub[f"{col}_rank"] = sub[col].rank(method="average", pct=True)
+
+        for i, col in enumerate(present_cols):
             r, p, rho, rp = _safe_corr(sub[col], sub[measured_col])
             stats_out[panel_name][col] = (r, p, rho, rp)
             label = (
@@ -336,7 +311,7 @@ def correlation_plot(
             )
             sns.regplot(
                 data=sub,
-                x=f"{col}_norm",
+                x=f"{col}_rank",
                 y=measured_col,
                 ax=ax,
                 color=palette[i % len(palette)],
@@ -344,7 +319,8 @@ def correlation_plot(
                 scatter_kws={"alpha": 0.7, "edgecolors": "k", "linewidths": 0.5},
             )
 
-        ax.set_xlabel("Predicted score (normalized)")
+        ax.set_xlim(0, 1)
+        ax.set_xlabel("Predicted score (percentile rank within track)")
         ax.set_ylabel(measured_col)
         ax.set_title(f"Exon {panel_name} (n={len(sub)})")
         ax.legend(fontsize=8)

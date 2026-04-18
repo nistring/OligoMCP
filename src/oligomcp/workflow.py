@@ -19,10 +19,8 @@ from .core import (
     load_reference_sequence,
 )
 from .output import (
-    build_ucsc_url,
     correlation_plot,
     export_all,
-    open_ucsc_browser,
     print_correlation_table,
     write_experimental_bed,
 )
@@ -35,24 +33,7 @@ class WorkflowResult:
     bed_files: list[Path]
     correlation_plot: Optional[Path]
     stats: Optional[dict]
-    ucsc_instructions: str
-    ucsc_url: Optional[str] = None
     n_candidates: int = 0
-
-
-def _build_ucsc_instructions(assembly: str, bed_files: list[Path]) -> str:
-    url = f"https://genome.ucsc.edu/cgi-bin/hgCustom?db={assembly}"
-    lines = [
-        "=== UCSC Custom Track Upload ===",
-        f"1. Open: {url}",
-        "2. Click 'Choose File' and select one of the BED files below.",
-        "3. Click 'Submit' to load the track.",
-        "",
-        "Generated BED files:",
-    ]
-    for p in bed_files:
-        lines.append(f"  - {p}")
-    return "\n".join(lines)
 
 
 def run_workflow(
@@ -62,11 +43,10 @@ def run_workflow(
     skip_spliceai: bool = False,
     samples_max: int = 20,
     verbose: bool = False,
-    open_browser: bool = True,
 ) -> WorkflowResult:
     """Run the full OligoMCP pipeline and return paths + stats."""
     cfg = load_config(Path(config_path))
-    cfg.results_dir = Path(cfg.results_dir) / "ASO"
+    cfg.results_dir = Path(cfg.results_dir) / cfg.gene_symbol
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
 
     cfg.fasta_path = resolve_fasta_path(cfg.fasta_path, verbose=verbose)
@@ -232,7 +212,6 @@ def run_workflow(
                 score_columns=score_cols,
                 measured_col="Measured (RT-PCR)",
                 out_png=correlation_png,
-                include_combined=True,
             )
             print_correlation_table(stats)
 
@@ -247,29 +226,11 @@ def run_workflow(
     if exp_bed:
         bed_files.append(exp_bed)
 
-    exon_start, exon_end = cfg.exon_intervals
-    ucsc_fn = open_ucsc_browser if open_browser else build_ucsc_url
-    ucsc_url = ucsc_fn(
-        assembly=cfg.assembly,
-        chrom=chrom,
-        exon_start=exon_start,
-        exon_end=exon_end,
-        flank=cfg.flank,
-        bed_files=bed_files,
-    )
-    if verbose and ucsc_url:
-        verb = "Opened" if open_browser else "Built"
-        print(f"{verb} UCSC Genome Browser URL ({len(ucsc_url):,} chars)")
-
-    ucsc = _build_ucsc_instructions(cfg.assembly, bed_files)
-
     return WorkflowResult(
         scores_csv=scores_csv,
         bed_files=bed_files,
         correlation_plot=correlation_png,
         stats=stats,
-        ucsc_instructions=ucsc,
-        ucsc_url=ucsc_url,
         n_candidates=len(candidates),
     )
 

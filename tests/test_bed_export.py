@@ -142,3 +142,52 @@ def test_write_bed_absolute_coordinates(tmp_path: Path):
     assert int(cols[2]) == 9429644
     assert int(cols[6]) == 9429626
     assert int(cols[7]) == 9429644
+
+
+def test_write_bed_score_is_integer_0_to_1000(tmp_path: Path):
+    """UCSC BED spec: score column must be an integer in [0, 1000].
+
+    Floats here make UCSC silently reject the track, so the custom track
+    never shows up when the URL is opened in the browser.
+    """
+    cands = _mk_candidates(5)
+    scores = np.array([0.0005, -0.0006, 0.0003, -0.0002, 0.0004], dtype=np.float32)
+
+    compact, _ = write_bed(
+        results_dir=tmp_path,
+        config_name="T",
+        source="SpliceAI",
+        chrom="chr1",
+        strand="+",
+        candidates=cands,
+        scores=scores,
+        variant_interval_start=0,
+    )
+    data_lines = compact.read_text().strip().split("\n")[1:]
+    assert data_lines, "expected BED data rows"
+    for line in data_lines:
+        score_col = line.split("\t")[4]
+        # Must parse as int (no decimal point, no scientific notation)
+        assert score_col.lstrip("-").isdigit(), f"score column is not integer: {score_col!r}"
+        val = int(score_col)
+        assert 0 <= val <= 1000, f"score {val} out of BED spec range 0..1000"
+
+
+def test_write_bed_header_has_itemRgb_on(tmp_path: Path):
+    """Without itemRgb="On" in the track header, UCSC ignores the per-row RGB
+    column, so the red/blue gradient documented in _build_rows never renders."""
+    cands = _mk_candidates(2)
+    scores = np.array([0.5, -0.3], dtype=np.float32)
+    compact, full = write_bed(
+        results_dir=tmp_path,
+        config_name="T",
+        source="SpliceAI",
+        chrom="chr1",
+        strand="+",
+        candidates=cands,
+        scores=scores,
+        variant_interval_start=0,
+    )
+    for path in (compact, full):
+        header = path.read_text().splitlines()[0]
+        assert 'itemRgb="On"' in header, f"missing itemRgb=\"On\" in {path.name}: {header!r}"

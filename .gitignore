@@ -215,3 +215,4 @@ __marimo__/
 .claude.json
 CLAUDE.md
 .claudeignore
+results/*
