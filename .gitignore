@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Experimental ASO measurement data (kept locally, not committed).
+config/ASOseq_incl.csv
+
 # C extensions
 *.so
 
