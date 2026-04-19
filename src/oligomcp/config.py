@@ -60,8 +60,14 @@ class OligoConfig:
     aso_step: int = 1
     experimental_data: Optional[Path] = None
     target_mode: str = "exclude"
-    spliceai_batch: int = 12
+    # 0 = auto — score_asos_spliceai picks 256 on CUDA, 64 on CPU. A
+    # positive override is honored verbatim.
+    spliceai_batch: int = 0
     spliceai_threads: Optional[int] = None
+    # Concurrent HTTP workers for AlphaGenome's `predict_sequences` call.
+    # SDK default is 5; we fan out wider so network round-trips overlap
+    # with SpliceAI's GPU compute in the parallel workflow.
+    alphagenome_workers: int = 16
     resize_width: Optional[int] = None
     config_name: str = ""
 
@@ -121,8 +127,9 @@ def load_config(path: Path) -> OligoConfig:
         aso_step=int(raw.get("aso_step", 1)),
         experimental_data=_resolve(raw.get("experimental_data")),
         target_mode=raw.get("target_mode", "exclude"),
-        spliceai_batch=int(raw.get("spliceai_batch", 12)),
+        spliceai_batch=int(raw.get("spliceai_batch", 0)),
         spliceai_threads=raw.get("spliceai_threads"),
+        alphagenome_workers=int(raw.get("alphagenome_workers", 16)),
         resize_width=raw.get("resize_width"),
         config_name=path.stem,
     )

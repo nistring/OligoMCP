@@ -45,8 +45,11 @@ def test_load_defaults(tmp_path: Path):
     p = _write_cfg(tmp_path)
     cfg = load_config(p)
     assert cfg.experimental_data is None
-    assert cfg.spliceai_batch == 12
+    # 0 is the "auto" sentinel — `score_asos_spliceai` expands this to
+    # 256 on CUDA / 64 on CPU at runtime.
+    assert cfg.spliceai_batch == 0
     assert cfg.spliceai_threads is None
+    assert cfg.alphagenome_workers == 16
     assert cfg.fasta_path is None
     assert cfg.dna_api_key is None
 

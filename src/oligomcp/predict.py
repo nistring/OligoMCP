@@ -223,12 +223,17 @@ def score_asos_alphagenome(
         ctx.ref_seq[: c.position] + "N" * c.length + ctx.ref_seq[c.position + c.length :]
         for c in candidates
     ]
-    print(f"AlphaGenome: predicting {len(variants)} masked variants...")
+    max_workers = max(1, int(getattr(cfg, "alphagenome_workers", 16) or 16))
+    print(
+        f"AlphaGenome: predicting {len(variants)} masked variants "
+        f"(max_workers={max_workers})..."
+    )
     outputs = ctx.model.predict_sequences(
         intervals=[ctx.interval] * len(variants),
         sequences=variants,
         requested_outputs=ctx.requested_outputs,
         ontology_terms=cfg.ontology_terms,
+        max_workers=max_workers,
     )
 
     results: dict[str, np.ndarray] = {}
@@ -297,16 +302,42 @@ def _default_n_models() -> int:
     return 1
 
 
+def _resolve_spliceai_device() -> Any:
+    """Pick the torch device for SpliceAI.
+
+    Default: CUDA if `torch.cuda.is_available()`, otherwise CPU.
+    Override via `OLIGOMCP_SPLICEAI_DEVICE=cpu|cuda` — useful when the
+    installed CUDA build mismatches the host driver (torch returns
+    `is_available()=False` but we want an explicit error) or when
+    forcing CPU for deterministic benchmarks.
+    """
+    import torch
+
+    override = os.environ.get("OLIGOMCP_SPLICEAI_DEVICE", "").strip().lower()
+    if override == "cpu":
+        return torch.device("cpu")
+    if override == "cuda":
+        if not torch.cuda.is_available():
+            print(
+                "WARNING: OLIGOMCP_SPLICEAI_DEVICE=cuda but CUDA is not available; "
+                "falling back to CPU."
+            )
+            return torch.device("cpu")
+        return torch.device("cuda")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def setup_spliceai(
     threads: Optional[int] = None, weights_dir: Optional[Path] = None
 ) -> tuple[list[Any], Any]:
-    """Load (or retrieve cached) MANE-10000nt SpliceAI models on CPU.
+    """Load (or retrieve cached) MANE-10000nt SpliceAI models.
 
-    Loaded models are cached at module level and reused across every
-    subsequent call, saving ~5-10 s per model on each request that would
-    otherwise re-read the checkpoints. Thread-safe via double-checked
-    locking (the MCP server may dispatch tool calls from multiple
-    threads).
+    Auto-selects CUDA when available (override via
+    `OLIGOMCP_SPLICEAI_DEVICE=cpu`). Loaded models are cached at module
+    level and reused across every subsequent call, saving ~5-10 s per
+    model on each request that would otherwise re-read the checkpoints.
+    Thread-safe via double-checked locking (the MCP server may dispatch
+    tool calls from multiple threads).
 
     Number of models loaded is determined by `_default_n_models()` —
     one model by default, set `OLIGOMCP_SPLICEAI_N_MODELS=5` for the
@@ -323,7 +354,10 @@ def setup_spliceai(
 
     weights_dir = ensure_spliceai_weights(weights_dir)
     n_models = _default_n_models()
-    cache_key = f"{Path(weights_dir).resolve()}|n={n_models}"
+    device = _resolve_spliceai_device()
+    # Device is part of the cache key so a CPU-preloaded model is not
+    # accidentally reused when a later request forces CUDA (or vice versa).
+    cache_key = f"{Path(weights_dir).resolve()}|n={n_models}|dev={device}"
 
     cached = _SPLICEAI_CACHE.get(cache_key)
     if cached is not None:
@@ -334,15 +368,18 @@ def setup_spliceai(
         if cached is not None:
             return cached
 
-        torch.set_num_threads(threads or max(1, (os.cpu_count() or 2) // 2))
+        if device.type == "cpu":
+            torch.set_num_threads(threads or max(1, (os.cpu_count() or 2) // 2))
         torch.set_grad_enabled(False)
-        device = torch.device("cpu")
 
         pt_files = sorted(Path(weights_dir).glob("*.pt"))[:n_models]
         if not pt_files:
             raise RuntimeError(f"No .pt weight files found in {weights_dir}.")
 
-        print(f"SpliceAI: loading {len(pt_files)}-model ensemble from {weights_dir}")
+        print(
+            f"SpliceAI: loading {len(pt_files)}-model ensemble on {device} "
+            f"from {weights_dir}"
+        )
 
         models: list[Any] = []
         for pt in pt_files:
@@ -414,12 +451,24 @@ def _forward_ensemble(models: list[Any], batch):
         return torch.stack(outs, dim=0).mean(dim=0)
 
 
+def _auto_spliceai_batch(device: Any) -> int:
+    """Pick a default batch size when the user leaves `spliceai_batch` at 0.
+
+    Larger batches amortize fixed per-call overhead (Python, CUDA launch,
+    BLAS setup), so the sweet spot depends on hardware: GPUs can carry
+    hundreds of 15-kbase windows per forward pass, CPUs are bottlenecked
+    by BLAS and memory bandwidth long before that.
+    """
+    return 256 if getattr(device, "type", "cpu") == "cuda" else 64
+
+
 def score_asos_spliceai(
     cfg: OligoConfig,
     candidates: list[AsoCandidate],
     chrom: str,
     variant_interval_start_genomic: int,
     models: Optional[list[Any]] = None,
+    device: Any = None,
 ) -> np.ndarray:
     """Score each candidate via `diff_mean_frac` on donor+acceptor probabilities.
 
@@ -430,12 +479,17 @@ def score_asos_spliceai(
     junction probability (skip-promoting).
     """
     if models is None:
-        models, _ = setup_spliceai(cfg.spliceai_threads)
+        models, device = setup_spliceai(cfg.spliceai_threads)
+    if device is None:
+        # The loaded model carries the authoritative device; infer from it
+        # so stale cached callers still work after the GPU path landed.
+        device = next(models[0].parameters()).device
 
     base_tensor, win_start, exon_a, exon_b = _build_base_tensor(
         cfg.fasta_path, chrom, int(cfg.exon_intervals[0]), int(cfg.exon_intervals[1]),
         assembly=cfg.assembly,
     )
+    base_tensor = base_tensor.to(device)
 
     ref_out = _forward_ensemble(models, base_tensor)
     # SpliceAI softmax output: channel 1 = acceptor, channel 2 = donor.
@@ -449,9 +503,10 @@ def score_asos_spliceai(
     ref_arr = ref_signal[:, None]
 
     scores = np.zeros(len(candidates), dtype=np.float32)
-    batch_size = max(1, int(cfg.spliceai_batch))
+    requested_batch = int(cfg.spliceai_batch)
+    batch_size = requested_batch if requested_batch > 0 else _auto_spliceai_batch(device)
     print(
-        f"SpliceAI: scoring {len(candidates)} ASOs on CPU "
+        f"SpliceAI: scoring {len(candidates)} ASOs on {device} "
         f"(batch={batch_size}, SL={SL}, CL={CL_MAX})..."
     )
 

@@ -20,6 +20,7 @@
   "aso_step": 1,
   "target_mode": "exclude",
   "experimental_data": "ASOseq_incl.csv",
-  "spliceai_batch": 12,
-  "spliceai_threads": null
+  "spliceai_batch": 0,
+  "spliceai_threads": null,
+  "alphagenome_workers": 16
 }

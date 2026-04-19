@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -142,24 +143,54 @@ def run_workflow(
             "No ASO candidates produced. Check experimental data and scan region."
         )
 
-    if not skip_alphagenome and ag_ctx is not None:
+    # Run AlphaGenome (HTTP-bound) and SpliceAI (torch compute-bound) on
+    # parallel threads — their workloads don't compete for the same
+    # resource, so wall time drops to roughly max(t_ag, t_sai). Both code
+    # paths release the GIL during their heavy work (urllib3 I/O and
+    # torch C++ kernels respectively), so plain threading is enough.
+    ag_results: dict[str, np.ndarray] = {}
+    sai_scores = None
+
+    sai_models = None
+    sai_device = None
+    if not skip_spliceai:
+        from .predict import setup_spliceai
+
+        # Load (or reuse cached) models before dispatching so cache init
+        # happens once under the module-level lock rather than racing two
+        # worker threads against the same double-checked setup.
+        sai_models, sai_device = setup_spliceai(cfg.spliceai_threads)
+
+    def _run_ag() -> dict[str, np.ndarray]:
+        if skip_alphagenome or ag_ctx is None:
+            return {}
         from .predict import score_asos_alphagenome
 
-        ag_results = score_asos_alphagenome(ag_ctx, cfg, candidates)
-        for name, arr in ag_results.items():
-            all_scores[f"AlphaGenome_{name}"] = arr
+        return score_asos_alphagenome(ag_ctx, cfg, candidates)
 
-    if not skip_spliceai:
-        from .predict import score_asos_spliceai, setup_spliceai
+    def _run_sai():
+        if skip_spliceai:
+            return None
+        from .predict import score_asos_spliceai
 
-        sai_models, _ = setup_spliceai(cfg.spliceai_threads)
-        sai_scores = score_asos_spliceai(
+        return score_asos_spliceai(
             cfg,
             candidates,
             chrom=chrom,
             variant_interval_start_genomic=ref_anchor_genomic,
             models=sai_models,
+            device=sai_device,
         )
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="oligomcp-score") as ex:
+        ag_future = ex.submit(_run_ag)
+        sai_future = ex.submit(_run_sai)
+        ag_results = ag_future.result()
+        sai_scores = sai_future.result()
+
+    for name, arr in ag_results.items():
+        all_scores[f"AlphaGenome_{name}"] = arr
+    if sai_scores is not None:
         all_scores["SpliceAI"] = sai_scores
 
     scores_df = pd.DataFrame(
