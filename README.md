@@ -124,6 +124,22 @@ patient sequence** (`predict_sequence`) so `diff_mean_frac` compares
 patient-WT vs patient-ASO — otherwise every ASO score would absorb the
 variant's own splicing effect.
 
+**Coordinate convention**: `exon_intervals` are always given in
+**reference-genome coordinates** (0-based, half-open), regardless of
+whether variants are applied. The workflow translates them to
+patient-sequence offsets internally via
+`VariantCoordMap.ref_to_patient` at `src/oligomcp/workflow.py:148`.
+So an upstream indel shifts the exon's *offset inside `ref_seq`*, but
+the `exon_intervals` you write in the config never change — they
+reference the same reference-genome positions annotations give you
+(mygene.info, UCSC, Ensembl). If an applied variant deletes the exon
+start or end entirely, the workflow raises `ExonDeletedByVariant`
+(MCP status: `variant_error`).
+
+Variant `position` fields are also reference-genome coordinates —
+VCF's 1-based convention for strings/dicts, matching every supported
+notation (VCF, HGVS g./c., rsID, ClinVar).
+
 Outputs:
 - `<name>_applied_variants.json` — run-reproducibility metadata (every
   variant, its genomic position, ref→alt, Δ length, offset inside the
