@@ -116,6 +116,54 @@ def test_missing_opinionated_fields_empty_when_all_present(tmp_path: Path):
     assert missing_opinionated_fields(raw) == []
 
 
+def test_variants_field_round_trips(tmp_path: Path):
+    """`variants` is opt-in: when present it must round-trip verbatim
+    through load_config (parsing is deferred to workflow where
+    gene_symbol / assembly are in scope)."""
+    p = _write_cfg(
+        tmp_path,
+        variants=[
+            "chr5:70070740:G:A",
+            {"chrom": "chr5", "position": 70070700, "ref": "AAG", "alt": "", "id": "demo_del"},
+        ],
+    )
+    cfg = load_config(p)
+    assert cfg.variants is not None
+    assert len(cfg.variants) == 2
+    assert cfg.variants[0] == "chr5:70070740:G:A"
+    assert cfg.variants[1]["id"] == "demo_del"
+    assert cfg.variants[1]["position"] == 70070700
+
+
+def test_variants_default_none(tmp_path: Path):
+    p = _write_cfg(tmp_path)
+    cfg = load_config(p)
+    assert cfg.variants is None
+
+
+def test_variants_wrong_type_rejected(tmp_path: Path):
+    p = _write_cfg(tmp_path, variants="chr5:70070740:G:A")   # must be a list
+    with pytest.raises(ValueError):
+        load_config(p)
+
+
+def test_variants_items_must_be_str_or_dict(tmp_path: Path):
+    p = _write_cfg(tmp_path, variants=[123])
+    with pytest.raises(ValueError):
+        load_config(p)
+
+
+def test_variants_not_in_missing_opinionated_fields(tmp_path: Path):
+    """variants is purely opt-in and must never appear in the
+    needs-info gate (otherwise Claude would be prompted to set it for
+    every ASO run)."""
+    from oligomcp.config import missing_opinionated_fields
+
+    raw = {"gene_symbol": "SETD5"}
+    names = {e["name"] for e in missing_opinionated_fields(raw)}
+    assert "variants" not in names
+
+
 def test_input_paths_still_resolve_relative_to_config(tmp_path: Path, monkeypatch):
     """fasta_path / experimental_data must stay config-dir-relative so input
     bundles shipped next to the JSON keep working regardless of CWD."""

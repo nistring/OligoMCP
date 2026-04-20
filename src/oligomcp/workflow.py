@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json as _json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,8 @@ class WorkflowResult:
     correlation_plot: Optional[Path]
     stats: Optional[dict]
     n_candidates: int = 0
+    applied_variants: Optional[list[dict]] = None
+    applied_variants_json: Optional[Path] = None
 
 
 def run_workflow(
@@ -76,6 +79,10 @@ def run_workflow(
     scan_start_rel: int = 0
     scan_end_rel: int = 0
     exp_df: Optional[pd.DataFrame] = None
+    # Populated below when cfg.variants is set; used downstream by
+    # SpliceAI's window builder and by BED coord remapping.
+    coord_map = None
+    parsed_variants: list = []
 
     if not skip_alphagenome:
         from .predict import setup_alphagenome
@@ -98,6 +105,107 @@ def run_workflow(
         ref_anchor_genomic = scan_genomic_start
         scan_start_rel = 0
         scan_end_rel = len(ref_seq)
+
+    # --- patient-baseline swap -------------------------------------------
+    # If the user has supplied variants, edit them into ref_seq BEFORE ASO
+    # enumeration so the downstream pipeline designs against the patient
+    # genome. AlphaGenome's `predict_sequence` requires len(sequence) ==
+    # interval.width, so indels are re-padded/trimmed from downstream
+    # reference; AG's WT baseline prediction is then re-fetched on the
+    # patient sequence so `diff_mean_frac`'s ref-vs-alt deltas don't
+    # absorb the variant's own splicing effect into every ASO score.
+    if cfg.variants:
+        from .variants import (
+            ExonDeletedByVariant,
+            apply_variants_to_ref,
+            pad_or_trim_to_length,
+            parse_variant,
+        )
+
+        reference_seq_length = len(ref_seq)
+        parsed_variants = [
+            parse_variant(v, gene_symbol=cfg.gene_symbol, assembly=cfg.assembly)
+            for v in cfg.variants
+        ]
+        ref_seq, coord_map = apply_variants_to_ref(
+            ref_seq, parsed_variants,
+            anchor_genomic=ref_anchor_genomic, chrom=chrom,
+        )
+        if verbose:
+            print(
+                f"Applied {len(coord_map.applied)} variant(s) to ref_seq "
+                f"(total Δ={coord_map.total_delta():+d} bp):"
+            )
+            for av in coord_map.applied:
+                v = av.variant
+                print(
+                    f"  - {v.notation[:40]:40s}  "
+                    f"{v.chrom}:{v.position} {v.ref or '-'}>{v.alt or '-'}  "
+                    f"(Δ={av.delta:+d}, ref_offset={av.ref_offset})"
+                )
+
+        ex_start_g, ex_end_g = cfg.exon_intervals
+        ex_start_patient = coord_map.ref_to_patient(ex_start_g)
+        ex_end_patient = coord_map.ref_to_patient(ex_end_g)
+        if ex_start_patient is None or ex_end_patient is None:
+            raise ExonDeletedByVariant(
+                f"Applied variants remove part of the target exon "
+                f"[{ex_start_g}, {ex_end_g}). Nothing to design ASOs against."
+            )
+
+        if ag_ctx is not None:
+            def _fetch(chrom_, a, b):
+                return load_reference_sequence(cfg.fasta_path, chrom_, a, b, assembly=cfg.assembly)
+
+            required = ag_ctx.interval.width
+            ref_seq = pad_or_trim_to_length(
+                ref_seq,
+                target=required,
+                fetcher=_fetch,
+                chrom=chrom,
+                anchor_genomic=ref_anchor_genomic,
+                original_length=reference_seq_length,
+            )
+            ag_ctx.ref_seq = ref_seq
+            # Re-fetch WT prediction on the patient baseline.
+            if verbose:
+                print("Re-fetching AlphaGenome baseline on patient sequence...")
+            ag_ctx.ref_output = ag_ctx.model.predict_sequence(
+                interval=ag_ctx.interval,
+                sequence=ref_seq,
+                requested_outputs=ag_ctx.requested_outputs,
+                ontology_terms=cfg.ontology_terms,
+            )
+            # Remap coordinate offsets that were computed in reference
+            # space by `setup_alphagenome`. gene_start_rel / gene_end_rel
+            # are almost always not at the exon boundaries, so use the
+            # coord map; scan_start/end are `variant_interval.start` ±
+            # flank and track the exon.
+            def _remap(g):
+                pat = coord_map.ref_to_patient(g)
+                if pat is None:
+                    return None
+                return pat  # already 0-based patient offset, anchored at ref_anchor_genomic
+
+            ag_ctx.exon_start_rel = ex_start_patient
+            ag_ctx.exon_end_rel = ex_end_patient
+            gs = _remap(ref_anchor_genomic + ag_ctx.gene_start_rel)
+            ge = _remap(ref_anchor_genomic + ag_ctx.gene_end_rel)
+            if gs is not None:
+                ag_ctx.gene_start_rel = gs
+            if ge is not None:
+                ag_ctx.gene_end_rel = ge
+            # Update scan range (start_rel/end_rel) to match new patient
+            # coordinates. variant_interval is flanked around the exon.
+            ag_ctx.start_rel = max(0, ex_start_patient - cfg.flank[0])
+            ag_ctx.end_rel = min(len(ref_seq), ex_end_patient + cfg.flank[1])
+            scan_start_rel = ag_ctx.start_rel
+            scan_end_rel = ag_ctx.end_rel
+        else:
+            # skip_alphagenome path — ref_seq is exon±flank and its
+            # length equals scan_end_rel. Re-anchor to patient coords.
+            scan_start_rel = 0
+            scan_end_rel = len(ref_seq)
 
     if cfg.experimental_data:
         exp_df = load_experimental(cfg.experimental_data)
@@ -180,6 +288,8 @@ def run_workflow(
             variant_interval_start_genomic=ref_anchor_genomic,
             models=sai_models,
             device=sai_device,
+            applied_variants=parsed_variants if cfg.variants else None,
+            coord_map=coord_map,
         )
 
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="oligomcp-score") as ex:
@@ -220,6 +330,7 @@ def run_workflow(
         variant_interval_start=ref_anchor_genomic,
         candidates=candidates,
         all_scores=all_scores,
+        coord_map=coord_map,
     )
 
     correlation_png: Optional[Path] = None
@@ -255,9 +366,34 @@ def run_workflow(
         strand=cfg.strand,
         candidates=candidates,
         variant_interval_start=ref_anchor_genomic,
+        coord_map=coord_map,
     )
     if exp_bed:
         bed_files.append(exp_bed)
+
+    applied_variant_records: Optional[list[dict]] = None
+    applied_variants_json: Optional[Path] = None
+    if coord_map is not None:
+        from .variants import applied_variants_to_records
+
+        applied_variant_records = applied_variants_to_records(coord_map)
+        applied_variants_json = cfg.results_dir / f"{cfg.config_name}_applied_variants.json"
+        applied_variants_json.write_text(
+            _json.dumps(
+                {
+                    "run_id": run_id,
+                    "baseline": "patient",
+                    "gene_symbol": cfg.gene_symbol,
+                    "assembly": cfg.assembly,
+                    "applied_variants": applied_variant_records,
+                    "patient_seq_length": len(ref_seq),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if verbose:
+            print(f"Wrote {applied_variants_json}")
 
     return WorkflowResult(
         scores_csv=scores_csv,
@@ -265,6 +401,8 @@ def run_workflow(
         correlation_plot=correlation_png,
         stats=stats,
         n_candidates=len(candidates),
+        applied_variants=applied_variant_records,
+        applied_variants_json=applied_variants_json,
     )
 
 

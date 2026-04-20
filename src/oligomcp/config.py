@@ -70,6 +70,12 @@ class OligoConfig:
     alphagenome_workers: int = 16
     resize_width: Optional[int] = None
     config_name: str = ""
+    # Opt-in list of variants to edit into ref_seq before ASO scoring.
+    # Each entry is a string (VCF/HGVS-g/HGVS-c/rsID/ClinVar) or a dict
+    # with explicit fields {chrom, position, ref, alt, id?}. Parsing is
+    # deferred to `workflow.run_workflow` where gene_symbol / assembly
+    # are in scope; `load_config` only validates item shape.
+    variants: Optional[list] = None
 
 
 def load_config(path: Path) -> OligoConfig:
@@ -109,6 +115,21 @@ def load_config(path: Path) -> OligoConfig:
     )
     flank = raw.get("flank", [200, 200])
 
+    raw_variants = raw.get("variants")
+    variants: Optional[list] = None
+    if raw_variants is not None:
+        if not isinstance(raw_variants, list):
+            raise ValueError(
+                f"`variants` must be a list, got {type(raw_variants).__name__}."
+            )
+        for i, item in enumerate(raw_variants):
+            if not isinstance(item, (str, dict)):
+                raise ValueError(
+                    f"variants[{i}] must be str or dict, got "
+                    f"{type(item).__name__}: {item!r}"
+                )
+        variants = list(raw_variants)
+
     cfg = OligoConfig(
         gene_symbol=raw["gene_symbol"],
         exon_intervals=exon_intervals,
@@ -132,5 +153,6 @@ def load_config(path: Path) -> OligoConfig:
         alphagenome_workers=int(raw.get("alphagenome_workers", 16)),
         resize_width=raw.get("resize_width"),
         config_name=path.stem,
+        variants=variants,
     )
     return cfg

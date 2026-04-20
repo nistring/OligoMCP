@@ -1,0 +1,20 @@
+{
+  "gene_symbol": "SMN2",
+  "assembly": "hg38",
+  "gtf_url": "https://storage.googleapis.com/alphagenome/reference/gencode/hg38/gencode.v46.annotation.gtf.gz.feather",
+  "results_dir": "results",
+  "data_dir": "data",
+  "track_filter": "total RNA-seq",
+  "ontology_terms": ["CL:0000100"],
+  "requested_outputs": ["RNA_SEQ", "SPLICE_SITE_USAGE"],
+  "exon_intervals": [70070640, 70070751],
+  "flank": [200, 200],
+  "strand": "+",
+  "ASO_length": 18,
+  "aso_step": 5,
+  "target_mode": "exclude",
+  "variants": [
+    "chr5:70070740:G:A",
+    {"id": "demo_3bp_del", "chrom": "chr5", "position": 70070700, "ref": "AAG", "alt": ""}
+  ]
+}

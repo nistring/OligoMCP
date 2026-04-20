@@ -311,6 +311,7 @@ def predict_aso_efficacy_inline(
     requested_outputs: Optional[list[str]] = None,
     ontology_terms: Optional[list[str]] = None,
     track_filter: str = "polyA plus RNA-seq",
+    variants: Optional[list] = None,
 ) -> dict:
     """Run the full ASO scoring pipeline from arguments.
 
@@ -349,9 +350,20 @@ def predict_aso_efficacy_inline(
             the target CURIE has this descriptor via
             `search_ontology_terms(track_filter=…)` — a mismatch
             silently drops every AlphaGenome track.
+        variants: Optional list of variants to edit into the reference
+            sequence BEFORE running ASO design, producing a patient
+            baseline. Each entry is either:
+              - a string: VCF-style `"chr5:70070740:C:T"`, HGVS
+                `"chr5:g.70070740C>T"` / `"c.840C>T"`, rsID `"rs1800112"`,
+                or ClinVar `"VCV000000001"`.
+              - a dict: `{"chrom":"chr5","position":70070740,"ref":"C","alt":"T","id":"..."}`.
+            Indels (different ref/alt lengths) are supported; the
+            patient sequence is padded from downstream reference to
+            match AlphaGenome's interval width. When `variants` is set,
+            `applied_variants` is returned alongside the scoring output.
 
     Returns:
-        status: "ok" | "too_many_candidates" | "exon_intervals_required"
+        status: "ok" | "too_many_candidates" | "exon_intervals_required" | "variant_error"
         n_candidates: int
         scores_csv: str — path to the persisted per-ASO CSV.
         bed_files: list[str] — paths to persisted BED files.
@@ -394,7 +406,7 @@ def predict_aso_efficacy_inline(
     cfg_name = f"{gene_symbol}_e{exon_intervals[0]}_{exon_intervals[1]}"
     with tempfile.TemporaryDirectory(prefix="oligomcp_cfg_") as tmp:
         cfg_path = Path(tmp) / f"{cfg_name}.json"
-        cfg_path.write_text(json.dumps({
+        cfg_payload = {
             "gene_symbol": gene_symbol,
             "exon_intervals": list(exon_intervals),
             "assembly": assembly,
@@ -409,7 +421,10 @@ def predict_aso_efficacy_inline(
             "ontology_terms": ontology_terms,
             "requested_outputs": requested_outputs,
             "track_filter": track_filter,
-        }))
+        }
+        if variants:
+            cfg_payload["variants"] = list(variants)
+        cfg_path.write_text(json.dumps(cfg_payload))
 
         try:
             result: WorkflowResult = run_workflow(
@@ -422,6 +437,18 @@ def predict_aso_efficacy_inline(
                 "status": "exon_intervals_required",
                 "message": str(e),
             }
+        except Exception as e:
+            # Surface VariantApplicationError / VariantParseError with a
+            # dedicated status so Claude can react without string-matching.
+            from .variants import VariantError
+
+            if isinstance(e, VariantError):
+                return {
+                    "status": "variant_error",
+                    "message": str(e),
+                    "variant_error_type": type(e).__name__,
+                }
+            raise
 
     scores = _scores_from_csv(result.scores_csv)
     compact_beds = {p.name: p.read_text() for p in result.bed_files if p.exists()}
@@ -456,6 +483,10 @@ def predict_aso_efficacy_inline(
         "scores": scores,
         "top_candidates": top,
         "bed_tracks": compact_beds,
+        "applied_variants": result.applied_variants,
+        "applied_variants_json": (
+            str(result.applied_variants_json) if result.applied_variants_json else None
+        ),
     }
 
 
@@ -528,6 +559,16 @@ def predict_aso_efficacy(
                 "to get the list."
             ),
         }
+    except Exception as e:
+        from .variants import VariantError
+
+        if isinstance(e, VariantError):
+            return {
+                "status": "variant_error",
+                "message": str(e),
+                "variant_error_type": type(e).__name__,
+            }
+        raise
     return {
         "status": "ok",
         "scores_csv": str(result.scores_csv) if result.scores_csv else None,
@@ -537,6 +578,10 @@ def predict_aso_efficacy(
         ),
         "stats": _stats_to_json(result.stats),
         "n_candidates": result.n_candidates,
+        "applied_variants": result.applied_variants,
+        "applied_variants_json": (
+            str(result.applied_variants_json) if result.applied_variants_json else None
+        ),
     }
 
 

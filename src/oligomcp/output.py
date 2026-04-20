@@ -28,18 +28,57 @@ _BED_COLS = [
 
 # ---------- BED export ----------
 
+def _candidate_genomic_span(
+    c: AsoCandidate, anchor: int, coord_map,
+) -> Optional[tuple[int, int]]:
+    """Return the (chromStart, chromEnd) genomic span for an ASO candidate.
+
+    When ``coord_map`` is None (no patient-baseline swap), the span is
+    just ``anchor + position .. anchor + position + length``. When a
+    coord_map is provided, each endpoint is translated from patient
+    offset back to reference coords via ``patient_to_ref``. If either
+    endpoint falls inside an insertion (no reference position exists)
+    the candidate has no representation on the reference genome — we
+    return None so the caller can skip it for BED.
+    """
+    if coord_map is None:
+        s = anchor + c.position
+        return s, s + c.length
+    s = coord_map.patient_to_ref(c.position)
+    e = coord_map.patient_to_ref(c.position + c.length)
+    if s is None or e is None or e <= s:
+        return None
+    return s, e
+
+
 def _build_rows(
     selected: list[tuple[AsoCandidate, float]],
     chrom: str,
     bed_strand: str,
     anchor: int,
     invert: bool,
+    coord_map=None,
 ) -> pd.DataFrame:
     """Render (candidate, score) pairs into a 9-column BED DataFrame."""
     if not selected:
         return pd.DataFrame(columns=_BED_COLS)
 
-    cands, scores = zip(*selected)
+    # Drop any candidate whose patient offset has no reference mapping
+    # (lands inside an inserted region). Such candidates are kept in the
+    # scores CSV but have no valid BED coordinate.
+    filtered: list[tuple[AsoCandidate, float, int, int]] = []
+    for c, s in selected:
+        span = _candidate_genomic_span(c, anchor, coord_map)
+        if span is None:
+            continue
+        filtered.append((c, s, span[0], span[1]))
+    if not filtered:
+        return pd.DataFrame(columns=_BED_COLS)
+
+    cands = [t[0] for t in filtered]
+    scores = [t[1] for t in filtered]
+    starts = [t[2] for t in filtered]
+    ends = [t[3] for t in filtered]
     scores_arr = np.asarray(scores, dtype=np.float32)
 
     # Normalize |score| within this batch (per track, per invert-group) so the
@@ -67,8 +106,6 @@ def _build_rows(
     score_col = (abs_scores / max_abs * 1000).astype(int) if max_abs > 0 else np.zeros(len(cands), dtype=int)
     score_col = np.clip(score_col, 0, 1000)
 
-    starts = [anchor + c.position for c in cands]
-    ends = [anchor + c.position + c.length for c in cands]
     names = [f"{label}{i + 1}({s * 100:.2f}%)" for i, s in enumerate(scores_arr)]
 
     return pd.DataFrame(
@@ -106,11 +143,14 @@ def write_bed(
     candidates: list[AsoCandidate],
     scores: np.ndarray,
     variant_interval_start: int,
+    coord_map=None,
 ) -> Path:
     """Write one BED file covering every scored candidate.
 
     `candidates[i].position` is the ref_seq offset; absolute genomic starts
-    are `variant_interval_start + position`. The BED strand is inverted
+    are `variant_interval_start + position` (or, when a patient-baseline
+    swap was active, translated from patient coords back to reference
+    via ``coord_map.patient_to_ref``). The BED strand is inverted
     relative to the config strand (ASO binds the opposite strand).
     Positive scores get a red-gradient itemRgb, negative scores get blue.
     """
@@ -123,8 +163,8 @@ def write_bed(
     neg = sorted([p for p in pairs if p[1] < 0], key=lambda x: x[1])
 
     df = _safe_concat([
-        _build_rows(pos, chrom, bed_strand, variant_interval_start, invert=False),
-        _build_rows(neg, chrom, bed_strand, variant_interval_start, invert=True),
+        _build_rows(pos, chrom, bed_strand, variant_interval_start, invert=False, coord_map=coord_map),
+        _build_rows(neg, chrom, bed_strand, variant_interval_start, invert=True, coord_map=coord_map),
     ])
 
     path = results_dir / f"{config_name}_{source}.bed"
@@ -144,6 +184,7 @@ def export_all(
     variant_interval_start: int,
     candidates: list[AsoCandidate],
     all_scores: dict[str, np.ndarray],
+    coord_map=None,
 ) -> list[Path]:
     """Write one BED file per score source covering every scored candidate."""
     written: list[Path] = []
@@ -159,6 +200,7 @@ def export_all(
             candidates=candidates,
             scores=np.asarray(arr, dtype=np.float32),
             variant_interval_start=variant_interval_start,
+            coord_map=coord_map,
         )
         written.append(path)
     return written
@@ -171,6 +213,7 @@ def write_experimental_bed(
     strand: str,
     candidates: list[AsoCandidate],
     variant_interval_start: int,
+    coord_map=None,
 ) -> Optional[Path]:
     """Write a BED track from experimental measured (RT-PCR) values.
 
@@ -192,8 +235,10 @@ def write_experimental_bed(
 
     rows = []
     for i, ((c, m), intensity) in enumerate(zip(exp, intensities)):
-        s = variant_interval_start + c.position
-        e = s + c.length
+        span = _candidate_genomic_span(c, variant_interval_start, coord_map)
+        if span is None:
+            continue
+        s, e = span
         rows.append({
             "chrom": chrom,
             "chromStart": s,

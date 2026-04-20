@@ -404,8 +404,19 @@ def setup_spliceai(
 def _build_base_tensor(
     fasta_path: Optional[Path], chrom: str, exon_start: int, exon_end: int,
     assembly: str = "hg38",
+    applied_variants: Optional[list] = None,
 ):
-    """Center a (SL+CL) window on the exon midpoint and one-hot encode once."""
+    """Center a (SL+CL) window on the exon midpoint and one-hot encode once.
+
+    When ``applied_variants`` is given, variants whose genomic positions
+    fall inside the 15 kb window are edited into the loaded WT sequence
+    before one-hot encoding. Indels change the patient window length;
+    we pad with downstream reference or trim the right edge to keep
+    exactly INPUT_LEN bp so the rest of the SpliceAI machinery still
+    sees a 1×4×15000 tensor. ``exon_a`` / ``exon_b`` are returned in
+    patient-window offsets so the scoring indexes the correct
+    (post-edit) junction bases.
+    """
     import torch
 
     exon_mid = (exon_start + exon_end) // 2
@@ -419,16 +430,51 @@ def _build_base_tensor(
             f"Requested {INPUT_LEN} bp from {chrom}:{win_start}-{win_end}, "
             f"got {len(seq)} bp. Exon too close to chromosome edge?"
         )
-    tensor = torch.from_numpy(one_hot_encode(seq).T).unsqueeze(0).contiguous()
 
     exon_a = max(0, exon_start - sl_start)
     exon_b = min(SL, exon_end - sl_start)
+    local_coord_map = None
+
+    if applied_variants:
+        from .variants import apply_variants_to_ref, pad_or_trim_to_length
+
+        in_window = [
+            v for v in applied_variants
+            if v.chrom == chrom
+            and win_start <= (v.position - 1) < win_end
+            and (v.position - 1 + len(v.ref)) <= win_end
+        ]
+        if in_window:
+            seq, local_coord_map = apply_variants_to_ref(
+                seq, in_window, anchor_genomic=win_start, chrom=chrom,
+            )
+            seq = pad_or_trim_to_length(
+                seq, target=INPUT_LEN,
+                fetcher=lambda c, a, b: load_reference_sequence(
+                    fasta_path, c, a, b, assembly=assembly,
+                ),
+                chrom=chrom,
+                anchor_genomic=win_start,
+                original_length=INPUT_LEN,
+            )
+            # Remap exon boundaries into patient-window coords. If either
+            # junction was deleted by a variant, scoring becomes
+            # meaningless — fall through to the WT exon_a/exon_b and let
+            # downstream code surface NaN scores rather than crash.
+            mapped_a = local_coord_map.ref_to_patient(win_start + exon_a)
+            mapped_b = local_coord_map.ref_to_patient(win_start + exon_b)
+            if mapped_a is not None and mapped_b is not None:
+                exon_a = max(0, min(SL, mapped_a))
+                exon_b = max(0, min(SL, mapped_b))
+
+    tensor = torch.from_numpy(one_hot_encode(seq).T).unsqueeze(0).contiguous()
+
     if exon_a >= exon_b:
         raise RuntimeError(
             f"Target exon {exon_start}-{exon_end} falls outside the SL "
             f"window {sl_start}-{sl_start + SL}."
         )
-    return tensor, win_start, exon_a, exon_b
+    return tensor, win_start, exon_a, exon_b, local_coord_map
 
 
 def _forward_ensemble(models: list[Any], batch):
@@ -469,11 +515,20 @@ def score_asos_spliceai(
     variant_interval_start_genomic: int,
     models: Optional[list[Any]] = None,
     device: Any = None,
+    applied_variants: Optional[list] = None,
+    coord_map: Optional[object] = None,
 ) -> np.ndarray:
     """Score each candidate via `diff_mean_frac` on donor+acceptor probabilities.
 
     `candidates[i].position` is the offset within ref_seq;
     `variant_interval_start_genomic` is the genomic position of ref_seq[0].
+
+    When ``applied_variants`` is provided, the 15 kb SpliceAI window is
+    built from the patient baseline (WT window + variants edited in);
+    ``coord_map`` is used to map each candidate's ASO target position
+    from patient_seq coords (relative to the AlphaGenome interval) into
+    SpliceAI-window coords, so the ASO mask lands on the correct patient
+    bases.
 
     Returns a dimensionless per-candidate array. Negative = ASO reduces
     junction probability (skip-promoting).
@@ -485,9 +540,10 @@ def score_asos_spliceai(
         # so stale cached callers still work after the GPU path landed.
         device = next(models[0].parameters()).device
 
-    base_tensor, win_start, exon_a, exon_b = _build_base_tensor(
+    base_tensor, win_start, exon_a, exon_b, local_coord_map = _build_base_tensor(
         cfg.fasta_path, chrom, int(cfg.exon_intervals[0]), int(cfg.exon_intervals[1]),
         assembly=cfg.assembly,
+        applied_variants=applied_variants,
     )
     base_tensor = base_tensor.to(device)
 
@@ -517,7 +573,27 @@ def score_asos_spliceai(
 
         valid = np.ones(B, dtype=bool)
         for i, c in enumerate(batch_cands):
-            rel_start = variant_interval_start_genomic + c.position - win_start
+            # c.position is a 0-based offset within ref_seq. For the
+            # default (no variants) path that equals a reference offset;
+            # for the patient-baseline path it's a patient offset inside
+            # the AG interval, which we first translate to genomic via
+            # the AG coord_map, then into SpliceAI-window coords via
+            # local_coord_map (if variants reached the window).
+            if coord_map is not None:
+                gpos = coord_map.patient_to_ref(c.position)
+                if gpos is None:
+                    valid[i] = False
+                    continue
+            else:
+                gpos = variant_interval_start_genomic + c.position
+
+            if local_coord_map is not None:
+                rel_start = local_coord_map.ref_to_patient(gpos)
+                if rel_start is None:
+                    valid[i] = False
+                    continue
+            else:
+                rel_start = gpos - win_start
             rel_end = rel_start + c.length
             if rel_start < 0 or rel_end > INPUT_LEN:
                 valid[i] = False

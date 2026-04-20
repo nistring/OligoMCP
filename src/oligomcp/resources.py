@@ -21,6 +21,7 @@ from typing import Optional
 BASE_DIR = Path.home() / ".oligomcp"
 CRED_PATH = BASE_DIR / "credentials.json"
 GENOME_DIR = BASE_DIR / "genomes"
+VARIANT_CACHE_DIR = BASE_DIR / "variant_cache"
 HG38_FILENAME = "GRCh38.primary_assembly.genome.fa"
 HG38_URL = (
     "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/"
@@ -305,6 +306,193 @@ def canonical_transcript_exons(gene_info: dict) -> tuple[str, list[list[int]], O
         tx.get("cdsstart"),
         tx.get("cdsend"),
     )
+
+
+# ---------- variant lookup (dbSNP, ClinVar) ----------
+
+# RefSeq chromosome accessions (e.g. "NC_000005") → UCSC chrom names.
+# Also used by `oligomcp.variants._normalize_chrom`; kept here because
+# dbSNP / ClinVar responses report chromosomes in RefSeq form.
+_REFSEQ_CHROM_TABLE = {
+    **{f"NC_{i:06d}": f"chr{i}" for i in range(1, 23)},
+    "NC_000023": "chrX",
+    "NC_000024": "chrY",
+    "NC_012920": "chrM",
+}
+
+
+def _refseq_to_chrom(accession_base: str) -> Optional[str]:
+    """Return a UCSC chrom name for a RefSeq accession base ('NC_000005')."""
+    return _REFSEQ_CHROM_TABLE.get(accession_base)
+
+
+def _variant_cache_path(key: str) -> Path:
+    """Return an on-disk cache file for a variant lookup key."""
+    VARIANT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in key)
+    return VARIANT_CACHE_DIR / f"{safe}.json"
+
+
+def _assembly_aliases(assembly: str) -> tuple[str, ...]:
+    """Accepted aliases for matching NCBI's assembly names.
+
+    NCBI records report assembly as e.g. "GRCh38.p14" or "GRCh37.p13";
+    our config speaks "hg38"/"hg19"/"grch38"/"grch37". Map to a tuple of
+    case-insensitive prefixes for the caller to match against.
+    """
+    a = assembly.lower()
+    if a in {"hg38", "grch38"}:
+        return ("grch38",)
+    if a in {"hg19", "grch37"}:
+        return ("grch37",)
+    return (a,)
+
+
+def _fetch_json(url: str, *, timeout: int = 30) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "oligomcp/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def lookup_rsid_variant(rsid: str, *, assembly: str = "hg38") -> tuple[str, int, str, str]:
+    """Resolve an rsID to ``(chrom, position, ref, alt)`` for the given assembly.
+
+    Uses NCBI dbSNP's refsnp JSON (via eutils), which reports every
+    `placement_with_allele` entry including assembly and allele-string.
+    Responses are cached to disk to sidestep NCBI's ~3-req/s throttle
+    during iteration.
+
+    When a variant has multiple alt alleles, the first non-reference
+    allele is returned and a warning is emitted; use an explicit dict
+    input for disambiguation.
+    """
+    s = rsid.strip()
+    if not s.lower().startswith("rs"):
+        raise ValueError(f"rsID must start with 'rs': {rsid!r}")
+    rs_num = s[2:]
+    cache_path = _variant_cache_path(f"rsid_{rs_num}_{assembly.lower()}")
+    if cache_path.exists():
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    else:
+        url = f"https://api.ncbi.nlm.nih.gov/variation/v0/refsnp/{rs_num}"
+        cached = _fetch_json(url)
+        cache_path.write_text(json.dumps(cached), encoding="utf-8")
+
+    aliases = _assembly_aliases(assembly)
+    placements = cached.get("primary_snapshot_data", {}).get("placements_with_allele", [])
+    if not placements:
+        raise RuntimeError(f"dbSNP returned no placements for {rsid!r}.")
+
+    # Pick the placement whose assembly name matches our requested one.
+    chosen = None
+    for pl in placements:
+        for alt_asm in (pl.get("placement_annot", {}).get("seq_id_traits_by_assembly") or []):
+            asm_name = str(alt_asm.get("assembly_name", "")).lower()
+            if any(asm_name.startswith(a) for a in aliases):
+                chosen = pl
+                break
+        if chosen is not None:
+            break
+    if chosen is None:
+        raise RuntimeError(
+            f"dbSNP has no {assembly} placement for {rsid!r}. Available: "
+            + ", ".join(sorted({
+                str(a.get("assembly_name"))
+                for pl in placements
+                for a in (pl.get("placement_annot", {}).get("seq_id_traits_by_assembly") or [])
+            }))
+        )
+
+    alleles = chosen.get("alleles", [])
+    if not alleles:
+        raise RuntimeError(f"dbSNP placement for {rsid!r} carries no alleles.")
+
+    # Each allele carries a `spdi` record: {seq_id, position, deleted_sequence, inserted_sequence}.
+    ref_alleles = [
+        a for a in alleles
+        if a.get("allele", {}).get("spdi", {}).get("deleted_sequence")
+           == a.get("allele", {}).get("spdi", {}).get("inserted_sequence")
+    ]
+    alt_alleles = [a for a in alleles if a not in ref_alleles]
+    if not alt_alleles:
+        raise RuntimeError(f"dbSNP {rsid!r} carries only reference alleles.")
+
+    chosen_alt = alt_alleles[0]
+    if len(alt_alleles) > 1:
+        import warnings as _warnings
+        others = [a.get("allele", {}).get("spdi", {}).get("inserted_sequence") for a in alt_alleles[1:]]
+        _warnings.warn(
+            f"dbSNP {rsid!r} has multiple alt alleles; using the first "
+            f"({chosen_alt.get('allele', {}).get('spdi', {}).get('inserted_sequence')!r}). "
+            f"Others: {others!r}. Use an explicit variant dict to disambiguate.",
+            stacklevel=2,
+        )
+
+    spdi = chosen_alt.get("allele", {}).get("spdi") or {}
+    seq_id = str(spdi.get("seq_id", ""))
+    # seq_id is a RefSeq accession like "NC_000005.10"; map to chrN.
+    base = seq_id.split(".", 1)[0]
+    chrom = _refseq_to_chrom(base)
+    if chrom is None:
+        raise RuntimeError(f"Unrecognized RefSeq accession in dbSNP placement: {seq_id!r}")
+
+    # SPDI position is 0-based, VCF convention is 1-based.
+    position = int(spdi.get("position", 0)) + 1
+    ref = str(spdi.get("deleted_sequence") or "").upper()
+    alt = str(spdi.get("inserted_sequence") or "").upper()
+    return chrom, position, ref, alt
+
+
+def lookup_clinvar_variant(accession: str, *, assembly: str = "hg38") -> tuple[str, int, str, str]:
+    """Resolve a ClinVar VCV accession to ``(chrom, position, ref, alt)``.
+
+    Backed by NCBI's esummary JSON endpoint; the response contains the
+    VCF-style variation record under ``variation_set[0].variation_loc``.
+    Disk-cached like rsID lookups.
+    """
+    s = accession.strip()
+    if not s.upper().startswith("VCV"):
+        raise ValueError(f"ClinVar accession must start with 'VCV': {accession!r}")
+    vcv_num = s[3:].lstrip("0") or "0"
+    cache_path = _variant_cache_path(f"clinvar_{vcv_num}_{assembly.lower()}")
+    if cache_path.exists():
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    else:
+        url = (
+            f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+            f"?db=clinvar&id={vcv_num}&retmode=json"
+        )
+        cached = _fetch_json(url)
+        cache_path.write_text(json.dumps(cached), encoding="utf-8")
+
+    result = cached.get("result") or {}
+    record = result.get(str(vcv_num)) or {}
+    var_set = record.get("variation_set") or []
+    if not var_set:
+        raise RuntimeError(f"ClinVar {accession!r} has no variation_set.")
+    locs = var_set[0].get("variation_loc") or []
+    aliases = _assembly_aliases(assembly)
+    chosen = None
+    for loc in locs:
+        name = str(loc.get("assembly_name", "")).lower()
+        if any(name.startswith(a) for a in aliases):
+            chosen = loc
+            break
+    if chosen is None:
+        raise RuntimeError(
+            f"ClinVar {accession!r} has no {assembly} placement. Available: "
+            + ", ".join({str(l.get("assembly_name")) for l in locs})
+        )
+    chrom_raw = str(chosen.get("chr", "")).strip()
+    if not chrom_raw:
+        raise RuntimeError(f"ClinVar {accession!r} placement is missing chromosome.")
+    chrom = chrom_raw if chrom_raw.startswith("chr") else f"chr{chrom_raw}"
+    position = int(chosen.get("start") or chosen.get("display_start") or 0)
+    ref = str(chosen.get("ref") or chosen.get("reference_allele_vcf") or "").upper()
+    alt = str(chosen.get("alt") or chosen.get("alternate_allele_vcf") or "").upper()
+    if not ref and not alt:
+        raise RuntimeError(f"ClinVar {accession!r} placement has no ref/alt alleles.")
+    return chrom, position, ref, alt
 
 
 def fetch_sequence_ucsc(assembly: str, chrom: str, start: int, end: int) -> str:

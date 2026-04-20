@@ -83,6 +83,62 @@ plus RNA-seq`) — `grep` it or call `search_ontology_terms` from the
 MCP. Empty list = average across all tracks. Regenerate the snapshot
 with `oligomcp fetch-ontology-terms` (needs AlphaGenome key).
 
+## Patient baseline (apply variants before ASO design)
+
+Add a `variants` list to your config to **edit mutations into
+`ref_seq` before ASO enumeration** — the pipeline then designs against
+the patient's actual mRNA context, not wild-type. Useful when a known
+SNP would disrupt ASO affinity, or when you need to overlap a
+disease-causing variant.
+
+```json
+{
+  "gene_symbol": "SMN2",
+  "exon_intervals": [70070640, 70070751],
+  "variants": [
+    "chr5:70070740:G:A",
+    {"id": "demo_3bp_del", "chrom": "chr5", "position": 70070700,
+     "ref": "AAG", "alt": ""}
+  ]
+}
+```
+
+The list is heterogeneous — every entry below can appear in the same
+`variants` array, and all are applied together to form one combined
+patient baseline (overlaps are rejected):
+
+| Form | Example |
+|---|---|
+| VCF-style | `"chr5:70070740:G:A"` or `"5-70070740-G-A"` |
+| HGVS genomic | `"chr5:g.70070740G>A"`, `"chr5:g.70070700_70070702del"`, `"chr5:g.70070700_70070701insAT"` |
+| HGVS coding | `"c.840C>T"` (resolved against the gene's canonical transcript + strand) |
+| rsID | `"rs1800112"` (dbSNP lookup, disk-cached under `~/.oligomcp/variant_cache/`) |
+| ClinVar | `"VCV000000001"` |
+| Explicit dict | `{"chrom":"chr5","position":70070700,"ref":"AAG","alt":"","id":"my_del"}` |
+
+**Indels are supported** — AlphaGenome's interval is kept at its fixed
+width by padding with downstream reference (for deletions) or trimming
+the right edge (for insertions); SpliceAI's 15 kb window is rebuilt
+the same way. The WT AlphaGenome baseline is **re-fetched on the
+patient sequence** (`predict_sequence`) so `diff_mean_frac` compares
+patient-WT vs patient-ASO — otherwise every ASO score would absorb the
+variant's own splicing effect.
+
+Outputs:
+- `<name>_applied_variants.json` — run-reproducibility metadata (every
+  variant, its genomic position, ref→alt, Δ length, offset inside the
+  loaded window).
+- BED records are mapped back to reference-genome coordinates via
+  `VariantCoordMap.patient_to_ref`. ASOs whose binding site lands
+  inside an inserted region have no reference position and are kept in
+  the CSV but skipped in BED.
+
+From the MCP tools, pass the same list via the `variants` argument to
+`predict_aso_efficacy_inline`, or just run
+`predict_aso_efficacy(config_path)` against a JSON config that
+includes the field. Parser / ref-mismatch / overlap failures surface
+as `status="variant_error"` with the offending record.
+
 ## Outputs
 
 Land under `results/<gene_symbol>/<YYYYMMDD_HHMMSS>/` — each run gets
